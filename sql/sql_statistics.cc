@@ -4188,6 +4188,8 @@ void set_statistics_for_table(THD *thd, TABLE *table)
       }
     }
   }
+  if (thd->opt_ctx_replay)
+    thd->opt_ctx_replay->set_table_stats_from_context(table);
 }
 
 

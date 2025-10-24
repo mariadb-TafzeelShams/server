@@ -1,0 +1,38 @@
+SET sql_mode=ORACLE;
+
+--echo #
+--echo # MDEV-10152 Add support for TYPE .. IS REF CURSOR
+--echo #
+
+DELIMITER $$;
+CREATE PROCEDURE p1 IS
+  TYPE cur_t IS REF CURSOR;
+  c0 cur_t;
+  va INT;
+  vb VARCHAR(32);
+BEGIN
+  OPEN c0 FOR (SELECT 1,'b1' FROM DUAL) UNION (SELECT 2,'b2' FROM DUAL);
+  LOOP
+    FETCH c0 iNTO va, vb;
+    EXIT WHEN c0%NOTFOUND;
+    SELECT va, vb;
+  END LOOP;
+  CLOSE c0;
+END;
+$$
+DELIMITER ;$$
+CALL p1;
+DROP PROCEDURE p1;
+
+
+DELIMITER $$;
+CREATE PROCEDURE p1 IS
+  TYPE rec_t IS RECORD (a INT, b VARCHAR(10));
+  TYPE cur_t IS REF CURSOR RETURN rec_t;
+BEGIN
+  NULL;
+END;
+$$
+DELIMITER ;$$
+CALL p1;
+DROP PROCEDURE p1;

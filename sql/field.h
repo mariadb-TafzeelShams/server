@@ -5788,9 +5788,31 @@ public:
      m_cursor_rowtype_offset(0),
      m_row_field_definitions(NULL)
   { }
+  Spvar_definition(Row_definition_list *row_field_definitions)
+   :m_column_type_ref(NULL),
+    m_table_rowtype_ref(NULL),
+    m_cursor_rowtype_ref(false),
+    m_cursor_rowtype_offset(0),
+    m_row_field_definitions(row_field_definitions)
+  { }
+  Spvar_definition(Table_ident *table_rowtype_ref)
+   :m_column_type_ref(NULL),
+    m_table_rowtype_ref(table_rowtype_ref),
+    m_cursor_rowtype_ref(false),
+    m_cursor_rowtype_offset(0),
+    m_row_field_definitions(NULL)
+  { }
   const Type_handler *type_handler() const
   {
     return Type_handler_hybrid_field_type::type_handler();
+  }
+  bool is_empty() const
+  {
+    return Spvar_definition::type_handler() == &type_handler_null &&
+           !m_column_type_ref &&
+           !m_table_rowtype_ref &&
+           !m_cursor_rowtype_ref &&
+           !m_row_field_definitions;
   }
   bool is_column_type_ref() const { return m_column_type_ref != 0; }
   bool is_table_rowtype_ref() const { return m_table_rowtype_ref != 0; }

@@ -311,6 +311,7 @@ SET(INNOBASE_SOURCES
 	include/row0mysql.h
 	include/row0purge.h
 	include/row0quiesce.h
+	include/row0query.h
 	include/row0row.h
 	include/row0row.inl
 	include/row0sel.h
@@ -399,6 +400,7 @@ SET(INNOBASE_SOURCES
 	row/row0undo.cc
 	row/row0upd.cc
 	row/row0quiesce.cc
+	row/row0query.cc
 	row/row0vers.cc
 	srv/srv0mon.cc
 	srv/srv0srv.cc

@@ -566,3 +566,20 @@ dberr_t FTSQueryExecutor::read_all_common(const char *tbl_name,
   dict_table_t* table= m_common_tables[index_no];
   return m_executor->read(table, nullptr, PAGE_CUR_GE, callback);
 }
+
+CommonTableReader::CommonTableReader() : RecordCallback(
+  [this](const rec_t* rec, const dict_index_t* index, const rec_offs* offsets) -> bool {
+    ulint len;
+    const byte* id_data= rec_get_nth_field(rec, offsets, 0, &len);
+    if (id_data && len != UNIV_SQL_NULL && len == 8)
+    {
+      doc_id_t doc_id= mach_read_from_8(id_data);
+      doc_ids.push_back(doc_id);
+    }
+    return true;
+  },
+  [](const dtuple_t* search_tuple, const rec_t* rec,
+     const dict_index_t* index, const rec_offs* offsets) -> RecordCompareAction {
+    return RecordCompareAction::PROCESS; /* Process all records */
+  }
+) {}

@@ -824,16 +824,17 @@ fts_load_stopword(
 	bool		reload);		/*!< in: Whether it is during
 						reload of FTS table */
 
-/****************************************************************//**
-Read the rows from the FTS index
-@return DB_SUCCESS if OK */
-dberr_t
-fts_table_fetch_doc_ids(
-/*====================*/
-	trx_t*		trx,			/*!< in: transaction */
-	fts_table_t*	fts_table,		/*!< in: aux table */
-	fts_doc_ids_t*	doc_ids);		/*!< in: For collecting
-						doc ids */
+
+/** Read the rows from the fulltext index
+@param trx      transaction
+@param table    Fulltext table
+@param tbl_name table name
+@param doc_ids  collecting doc ids
+@return DB_SUCCESS or error code */
+dberr_t fts_table_fetch_doc_ids(trx_t *trx, dict_table_t *table,
+                                const char *tbl_name,
+                                fts_doc_ids_t *doc_ids) noexcept;
+
 /****************************************************************//**
 This function brings FTS index in sync when FTS index is first
 used. There are documents that have not yet sync-ed to auxiliary

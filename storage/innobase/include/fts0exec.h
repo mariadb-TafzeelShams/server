@@ -203,4 +203,18 @@ public:
   { return m_executor->get_heap(); }
 };
 
+/** Callback class for reading common table records
+(DELETED, BEING_DELETED, DELETED_CACHE, BEING_DELETED_CACHE) */
+class CommonTableReader : public RecordCallback
+{
+private:
+  std::vector<doc_id_t> doc_ids;
+
+public:
+  CommonTableReader();
+
+  const std::vector<doc_id_t>& get_doc_ids() const { return doc_ids; }
+  void clear() { doc_ids.clear(); }
+};
+
 #endif /* INNOBASE_FTS0QUERY_H */

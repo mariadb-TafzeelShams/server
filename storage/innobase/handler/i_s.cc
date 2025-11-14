@@ -2239,7 +2239,9 @@ i_s_fts_deleted_generic_fill(
 			   (being_deleted) ? "BEING_DELETED" : "DELETED",
 			   FTS_COMMON_TABLE, user_table);
 
-	fts_table_fetch_doc_ids(trx, &fts_table, deleted);
+	fts_table_fetch_doc_ids(
+		nullptr, user_table,
+                being_deleted ? "BEING_DELETED" : "DELETED", deleted);
 
 	dict_table_close(user_table, thd, mdl_ticket);
 

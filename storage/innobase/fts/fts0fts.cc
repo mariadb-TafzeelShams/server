@@ -30,6 +30,7 @@ Full Text Search interface
 #include "dict0stats_bg.h"
 #include "row0sel.h"
 #include "fts0fts.h"
+#include "fts0exec.h"
 #include "fts0priv.h"
 #include "fts0types.h"
 #include "fts0types.inl"
@@ -2837,13 +2838,10 @@ fts_delete(
 	fts_trx_table_t*ftt,			/*!< in: FTS trx table */
 	fts_trx_row_t*	row)			/*!< in: row */
 {
-	que_t*		graph;
 	fts_table_t	fts_table;
-	doc_id_t	write_doc_id;
 	dict_table_t*	table = ftt->table;
 	doc_id_t	doc_id = row->doc_id;
 	trx_t*		trx = ftt->fts_trx->trx;
-	pars_info_t*	info = pars_info_create();
 	fts_cache_t*	cache = table->fts->cache;
 
 	/* we do not index Documents whose Doc ID value is 0 */
@@ -2855,10 +2853,6 @@ fts_delete(
 	ut_a(row->state == FTS_DELETE || row->state == FTS_MODIFY);
 
 	FTS_INIT_FTS_TABLE(&fts_table, "DELETED", FTS_COMMON_TABLE, table);
-
-	/* Convert to "storage" byte order. */
-	fts_write_doc_id((byte*) &write_doc_id, doc_id);
-	fts_bind_doc_id(info, "doc_id", &write_doc_id);
 
 	/* It is possible we update a record that has not yet been sync-ed
 	into cache from last crash (delete Doc will not initialize the
@@ -2884,20 +2878,9 @@ fts_delete(
 	}
 
 	/* Note the deleted document for OPTIMIZE to purge. */
-	char	table_name[MAX_FULL_NAME_LEN];
-
 	trx->op_info = "adding doc id to FTS DELETED";
-
-	fts_table.suffix = "DELETED";
-
-	fts_get_table_name(&fts_table, table_name);
-	pars_info_bind_id(info, "deleted", table_name);
-
-	graph = fts_parse_sql(&fts_table, info,
-			      "BEGIN INSERT INTO $deleted VALUES (:doc_id);");
-
-	dberr_t error = fts_eval_sql(trx, graph);
-	que_graph_free(graph);
+	FTSQueryExecutor executor(trx, nullptr, table);
+	dberr_t error= executor.insert_common_record("DELETED", doc_id);
 
 	/* Increment the total deleted count, this is used to calculate the
 	number of documents indexed. */
@@ -3888,60 +3871,24 @@ void fts_doc_ids_sort(ib_vector_t *doc_ids)
   std::sort(data, data + doc_ids->used);
 }
 
-/*********************************************************************//**
-Add rows to the DELETED_CACHE table.
+/** Add rows to the DELETED_CACHE table.
 @return DB_SUCCESS if all went well else error code*/
 static MY_ATTRIBUTE((nonnull, warn_unused_result))
 dberr_t
-fts_sync_add_deleted_cache(
-/*=======================*/
-	fts_sync_t*	sync,			/*!< in: sync state */
-	ib_vector_t*	doc_ids)		/*!< in: doc ids to add */
+fts_sync_add_deleted_cache(fts_sync_t *sync, ib_vector_t *doc_ids)
 {
-	ulint		i;
-	pars_info_t*	info;
-	que_t*		graph;
-	fts_table_t	fts_table;
-	char		table_name[MAX_FULL_NAME_LEN];
-	doc_id_t	dummy = 0;
-	dberr_t		error = DB_SUCCESS;
-	ulint		n_elems = ib_vector_size(doc_ids);
-
-	ut_a(ib_vector_size(doc_ids) > 0);
-
-	fts_doc_ids_sort(doc_ids);
-
-	info = pars_info_create();
-
-	fts_bind_doc_id(info, "doc_id", &dummy);
-
-	FTS_INIT_FTS_TABLE(
-		&fts_table, "DELETED_CACHE", FTS_COMMON_TABLE, sync->table);
-
-	fts_get_table_name(&fts_table, table_name);
-	pars_info_bind_id(info, "table_name", table_name);
-
-	graph = fts_parse_sql(
-		&fts_table,
-		info,
-		"BEGIN INSERT INTO $table_name VALUES (:doc_id);");
-
-	for (i = 0; i < n_elems && error == DB_SUCCESS; ++i) {
-		doc_id_t*	update;
-		doc_id_t	write_doc_id;
-
-		update = static_cast<doc_id_t*>(ib_vector_get(doc_ids, i));
-
-		/* Convert to "storage" byte order. */
-		fts_write_doc_id((byte*) &write_doc_id, *update);
-		fts_bind_doc_id(info, "doc_id", &write_doc_id);
-
-		error = fts_eval_sql(sync->trx, graph);
-	}
-
-	que_graph_free(graph);
-
-	return(error);
+  ulint n_elems= ib_vector_size(doc_ids);
+  ut_a(n_elems > 0);
+  fts_doc_ids_sort(doc_ids);
+  FTSQueryExecutor executor(sync->trx, nullptr, sync->table);
+  dberr_t error= DB_SUCCESS;
+  for (uint32_t i= 0; i < n_elems && error == DB_SUCCESS; ++i)
+  {
+    doc_id_t *update=
+      static_cast<doc_id_t*>(ib_vector_get(doc_ids, i));
+    error= executor.insert_common_record("DELETED_CACHE", *update);
+  }
+  return error;
 }
 
 /** Write the words and ilist to disk.

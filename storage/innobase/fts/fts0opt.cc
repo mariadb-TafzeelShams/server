@@ -27,6 +27,7 @@ Completed 2011/7/10 Sunny and Jimmy Yang
 ***********************************************************************/
 
 #include "fts0fts.h"
+#include "fts0exec.h"
 #include "row0sel.h"
 #include "que0types.h"
 #include "fts0priv.h"
@@ -237,28 +238,6 @@ static ulint fts_optimize_time_limit;
 
 /** It's defined in fts0fts.cc  */
 extern const char* fts_common_tables[];
-
-/** SQL Statement for changing state of rows to be deleted from FTS Index. */
-static	const char* fts_init_delete_sql =
-	"BEGIN\n"
-	"\n"
-	"INSERT INTO $BEING_DELETED\n"
-		"SELECT doc_id FROM $DELETED;\n"
-	"\n"
-	"INSERT INTO $BEING_DELETED_CACHE\n"
-		"SELECT doc_id FROM $DELETED_CACHE;\n";
-
-static const char* fts_delete_doc_ids_sql =
-	"BEGIN\n"
-	"\n"
-	"DELETE FROM $DELETED WHERE doc_id = :doc_id1;\n"
-	"DELETE FROM $DELETED_CACHE WHERE doc_id = :doc_id2;\n";
-
-static const char* fts_end_delete_sql =
-	"BEGIN\n"
-	"\n"
-	"DELETE FROM $BEING_DELETED;\n"
-	"DELETE FROM $BEING_DELETED_CACHE;\n";
 
 /**********************************************************************//**
 Initialize fts_zip_t. */
@@ -921,109 +900,35 @@ fts_index_fetch_words(
 	return(error);
 }
 
-/**********************************************************************//**
-Callback function to fetch the doc id from the record.
-@return always returns TRUE */
-static
-ibool
-fts_fetch_doc_ids(
-/*==============*/
-	void*	row,		/*!< in: sel_node_t* */
-	void*	user_arg)	/*!< in: pointer to ib_vector_t */
+dberr_t fts_table_fetch_doc_ids(trx_t *trx, dict_table_t *table,
+                                const char *tbl_name,
+                                fts_doc_ids_t *doc_ids) noexcept
 {
-	que_node_t*	exp;
-	int		i = 0;
-	sel_node_t*	sel_node = static_cast<sel_node_t*>(row);
-	fts_doc_ids_t*	fts_doc_ids = static_cast<fts_doc_ids_t*>(user_arg);
-	doc_id_t*	update = static_cast<doc_id_t*>(
-		ib_vector_push(fts_doc_ids->doc_ids, NULL));
+  bool bk_trx= false;
+  if (!trx)
+  {
+    trx= trx_create();
+    bk_trx= true;
+  }
+  trx->op_info = "fetching FTS doc ids";
+  FTSQueryExecutor executor(trx, nullptr, table);
+  CommonTableReader reader;
+  dberr_t err= executor.read_all_common(tbl_name, reader);
 
-	for (exp = sel_node->select_list;
-	     exp;
-	     exp = que_node_get_next(exp), ++i) {
-
-		dfield_t*	dfield = que_node_get_val(exp);
-		void*		data = dfield_get_data(dfield);
-		ulint		len = dfield_get_len(dfield);
-
-		ut_a(len != UNIV_SQL_NULL);
-
-		/* Note: The column numbers below must match the SELECT. */
-		switch (i) {
-		case 0: /* DOC_ID */
-			*update = fts_read_doc_id(
-				static_cast<byte*>(data));
-			break;
-
-		default:
-			ut_error;
-		}
-	}
-
-	return(TRUE);
-}
-
-/**********************************************************************//**
-Read the rows from a FTS common auxiliary table.
-@return DB_SUCCESS or error code */
-dberr_t
-fts_table_fetch_doc_ids(
-/*====================*/
-	trx_t*		trx,		/*!< in: transaction */
-	fts_table_t*	fts_table,	/*!< in: table */
-	fts_doc_ids_t*	doc_ids)	/*!< in: For collecting doc ids */
-{
-	dberr_t		error;
-	que_t*		graph;
-	pars_info_t*	info = pars_info_create();
-	ibool		alloc_bk_trx = FALSE;
-	char		table_name[MAX_FULL_NAME_LEN];
-
-	ut_a(fts_table->suffix != NULL);
-	ut_a(fts_table->type == FTS_COMMON_TABLE);
-
-	if (!trx) {
-		trx = trx_create();
-		alloc_bk_trx = TRUE;
-	}
-
-	trx->op_info = "fetching FTS doc ids";
-
-	pars_info_bind_function(info, "my_func", fts_fetch_doc_ids, doc_ids);
-
-	fts_get_table_name(fts_table, table_name);
-	pars_info_bind_id(info, "table_name", table_name);
-
-	graph = fts_parse_sql(
-		fts_table,
-		info,
-		"DECLARE FUNCTION my_func;\n"
-		"DECLARE CURSOR c IS"
-		" SELECT doc_id FROM $table_name;\n"
-		"BEGIN\n"
-		"\n"
-		"OPEN c;\n"
-		"WHILE 1 = 1 LOOP\n"
-		"  FETCH c INTO my_func();\n"
-		"  IF c % NOTFOUND THEN\n"
-		"    EXIT;\n"
-		"  END IF;\n"
-		"END LOOP;\n"
-		"CLOSE c;");
-
-	error = fts_eval_sql(trx, graph);
-	fts_sql_commit(trx);
-	que_graph_free(graph);
-
-	if (error == DB_SUCCESS) {
-		fts_doc_ids_sort(doc_ids->doc_ids);
-	}
-
-	if (alloc_bk_trx) {
-		trx->free();
-	}
-
-	return(error);
+  if (err == DB_SUCCESS)
+  {
+    const auto& doc_id_vector= reader.get_doc_ids();
+    for (doc_id_t doc_id : doc_id_vector)
+      ib_vector_push(doc_ids->doc_ids, &doc_id);
+    fts_doc_ids_sort(doc_ids->doc_ids);
+  }
+  if (bk_trx)
+  {
+    if (err == DB_SUCCESS) fts_sql_commit(trx);
+    else fts_sql_rollback(trx);
+    trx->free();
+  }
+  return err;
 }
 
 /**********************************************************************//**
@@ -2022,190 +1927,97 @@ fts_optimize_index(
 	return(error);
 }
 
-/**********************************************************************//**
-Delete the document ids in the delete, and delete cache tables.
+/** Delete the document ids in the delete, and delete cache tables.
+@param optim optimize instance
 @return DB_SUCCESS if all OK */
 static MY_ATTRIBUTE((nonnull, warn_unused_result))
-dberr_t
-fts_optimize_purge_deleted_doc_ids(
-/*===============================*/
-	fts_optimize_t*	optim)	/*!< in: optimize instance */
+dberr_t fts_optimize_purge_deleted_doc_ids(fts_optimize_t *optim)
 {
-	ulint		i;
-	pars_info_t*	info;
-	que_t*		graph;
-	doc_id_t*	update;
-	doc_id_t	write_doc_id;
-	dberr_t		error = DB_SUCCESS;
-	char		deleted[MAX_FULL_NAME_LEN];
-	char		deleted_cache[MAX_FULL_NAME_LEN];
+  dberr_t error= DB_SUCCESS;
+  ut_a(ib_vector_size(optim->to_delete->doc_ids) > 0);
+  FTSQueryExecutor executor(optim->trx, nullptr, optim->table);
+  for (ulint i= 0;
+       i < ib_vector_size(optim->to_delete->doc_ids) && error != DB_SUCCESS;
+       ++i)
+  {
+    doc_id_t *update=
+      static_cast<doc_id_t*>(ib_vector_get(optim->to_delete->doc_ids, i));
+    error= executor.delete_common_record("DELETED", *update);
+    if (error == DB_SUCCESS)
+      error= executor.delete_common_record("DELTED_CACHED", *update);
+  }
 
-	info = pars_info_create();
-
-	ut_a(ib_vector_size(optim->to_delete->doc_ids) > 0);
-
-	update = static_cast<doc_id_t*>(
-		ib_vector_get(optim->to_delete->doc_ids, 0));
-
-	/* Convert to "storage" byte order. */
-	fts_write_doc_id((byte*) &write_doc_id, *update);
-
-	/* This is required for the SQL parser to work. It must be able
-	to find the following variables. So we do it twice. */
-	fts_bind_doc_id(info, "doc_id1", &write_doc_id);
-	fts_bind_doc_id(info, "doc_id2", &write_doc_id);
-
-	/* Make sure the following two names are consistent with the name
-	used in the fts_delete_doc_ids_sql */
-	optim->fts_common_table.suffix = fts_common_tables[3];
-	fts_get_table_name(&optim->fts_common_table, deleted);
-	pars_info_bind_id(info, fts_common_tables[3], deleted);
-
-	optim->fts_common_table.suffix = fts_common_tables[4];
-	fts_get_table_name(&optim->fts_common_table, deleted_cache);
-	pars_info_bind_id(info, fts_common_tables[4], deleted_cache);
-
-	graph = fts_parse_sql(NULL, info, fts_delete_doc_ids_sql);
-
-	/* Delete the doc ids that were copied at the start. */
-	for (i = 0; i < ib_vector_size(optim->to_delete->doc_ids); ++i) {
-
-		update = static_cast<doc_id_t*>(ib_vector_get(
-			optim->to_delete->doc_ids, i));
-
-		/* Convert to "storage" byte order. */
-		fts_write_doc_id((byte*) &write_doc_id, *update);
-
-		fts_bind_doc_id(info, "doc_id1", &write_doc_id);
-
-		fts_bind_doc_id(info, "doc_id2", &write_doc_id);
-
-		error = fts_eval_sql(optim->trx, graph);
-
-		// FIXME: Check whether delete actually succeeded!
-		if (error != DB_SUCCESS) {
-
-			fts_sql_rollback(optim->trx);
-			break;
-		}
-	}
-
-	que_graph_free(graph);
-
-	return(error);
+  if (error != DB_SUCCESS)
+    fts_sql_rollback(optim->trx);
+  return error;
 }
 
-/**********************************************************************//**
-Delete the document ids in the pending delete, and delete tables.
+/** Delete the document ids in the pending delete, and delete tables.
+@param optim optimize instance
 @return DB_SUCCESS if all OK */
 static MY_ATTRIBUTE((nonnull, warn_unused_result))
-dberr_t
-fts_optimize_purge_deleted_doc_id_snapshot(
-/*=======================================*/
-	fts_optimize_t*	optim)	/*!< in: optimize instance */
+dberr_t fts_optimize_purge_deleted_doc_id_snapshot(fts_optimize_t *optim)
 {
-	dberr_t		error;
-	que_t*		graph;
-	pars_info_t*	info;
-	char		being_deleted[MAX_FULL_NAME_LEN];
-	char		being_deleted_cache[MAX_FULL_NAME_LEN];
-
-	info = pars_info_create();
-
-	/* Make sure the following two names are consistent with the name
-	used in the fts_end_delete_sql */
-	optim->fts_common_table.suffix = fts_common_tables[0];
-	fts_get_table_name(&optim->fts_common_table, being_deleted);
-	pars_info_bind_id(info, fts_common_tables[0], being_deleted);
-
-	optim->fts_common_table.suffix = fts_common_tables[1];
-	fts_get_table_name(&optim->fts_common_table, being_deleted_cache);
-	pars_info_bind_id(info, fts_common_tables[1], being_deleted_cache);
-
-	/* Delete the doc ids that were copied to delete pending state at
-	the start of optimize. */
-	graph = fts_parse_sql(NULL, info, fts_end_delete_sql);
-
-	error = fts_eval_sql(optim->trx, graph);
-	que_graph_free(graph);
-
-	return(error);
+  FTSQueryExecutor executor(optim->trx, nullptr, optim->table);
+  dberr_t error= executor.delete_all_common_records("BEING_DELETED");
+  if (error == DB_SUCCESS)
+    error= executor.delete_all_common_records("BEING_DELETED_CACHE");
+  return error;
 }
 
-/**********************************************************************//**
-Copy the deleted doc ids that will be purged during this optimize run
-to the being deleted FTS auxiliary tables. The transaction is committed
-upon successfull copy and rolled back on DB_DUPLICATE_KEY error.
+/** Copy the deleted doc ids that will be purged during this
+optimize run to the being deleted FTS auxiliary tables.
+The transaction is committed upon successfull copy and rolled
+back on DB_DUPLICATE_KEY error.
+@param optim optimize instance
+@param n_rows number of rows exist in being_deleted table
 @return DB_SUCCESS if all OK */
 static
-ulint
-fts_optimize_being_deleted_count(
-/*=============================*/
-	fts_optimize_t*	optim)	/*!< in: optimize instance */
+dberr_t fts_optimize_being_deleted_count(fts_optimize_t *optim,
+                                         ulint *n_rows)
 {
-	fts_table_t	fts_table;
-
-	FTS_INIT_FTS_TABLE(&fts_table, "BEING_DELETED", FTS_COMMON_TABLE,
-			   optim->table);
-
-	return(fts_get_rows_count(&fts_table));
+  FTSQueryExecutor executor(optim->trx, nullptr, optim->table);
+  CommonTableReader reader;
+  dberr_t err= executor.read_all_common("BEING_DELETED", reader);
+  if (err == DB_SUCCESS) *n_rows= reader.get_doc_ids().size();
+  return err;
 }
 
-/*********************************************************************//**
-Copy the deleted doc ids that will be purged during this optimize run
-to the being deleted FTS auxiliary tables. The transaction is committed
-upon successfull copy and rolled back on DB_DUPLICATE_KEY error.
-@return DB_SUCCESS if all OK */
+/** Create a snapshot of deleted document IDs by moving them from
+DELETED to BEING_DELETED and from DELETED_CACHE to
+BEING_DELETED_CACHE.
+@param optim optimize fts instance
+@return DB_SUCCESS or error code */
 static MY_ATTRIBUTE((nonnull, warn_unused_result))
-dberr_t
-fts_optimize_create_deleted_doc_id_snapshot(
-/*========================================*/
-	fts_optimize_t*	optim)	/*!< in: optimize instance */
+dberr_t fts_optimize_create_deleted_doc_id_snapshot(fts_optimize_t *optim)
 {
-	dberr_t		error;
-	que_t*		graph;
-	pars_info_t*	info;
-	char		being_deleted[MAX_FULL_NAME_LEN];
-	char		deleted[MAX_FULL_NAME_LEN];
-	char		being_deleted_cache[MAX_FULL_NAME_LEN];
-	char		deleted_cache[MAX_FULL_NAME_LEN];
+  dberr_t err= DB_SUCCESS;
+  FTSQueryExecutor executor(optim->trx, nullptr, optim->table);
+  CommonTableReader reader;
 
-	info = pars_info_create();
+  err= executor.read_all_common("DELETED", reader);
+  if (err != DB_SUCCESS && err != DB_RECORD_NOT_FOUND) return err;
 
-	/* Make sure the following four names are consistent with the name
-	used in the fts_init_delete_sql */
-	optim->fts_common_table.suffix = fts_common_tables[0];
-	fts_get_table_name(&optim->fts_common_table, being_deleted);
-	pars_info_bind_id(info, fts_common_tables[0], being_deleted);
+  const auto& deleted_doc_ids = reader.get_doc_ids();
+  for (doc_id_t doc_id : deleted_doc_ids)
+  {
+    err= executor.insert_common_record("BEING_DELETED", doc_id);
+    if (err != DB_SUCCESS) return err;
+  }
 
-	optim->fts_common_table.suffix = fts_common_tables[3];
-	fts_get_table_name(&optim->fts_common_table, deleted);
-	pars_info_bind_id(info, fts_common_tables[3], deleted);
+  reader.clear();
+  err= executor.read_all_common("DELETED_CACHE", reader);
+  if (err != DB_SUCCESS && err != DB_RECORD_NOT_FOUND) return err;
 
-	optim->fts_common_table.suffix = fts_common_tables[1];
-	fts_get_table_name(&optim->fts_common_table, being_deleted_cache);
-	pars_info_bind_id(info, fts_common_tables[1], being_deleted_cache);
+  const auto& deleted_cache_doc_ids= reader.get_doc_ids();
+  for (doc_id_t doc_id : deleted_cache_doc_ids)
+  {
+    err= executor.insert_common_record("BEING_DELETED_CACHE", doc_id);
+    if (err != DB_SUCCESS) return err;
+  }
 
-	optim->fts_common_table.suffix = fts_common_tables[4];
-	fts_get_table_name(&optim->fts_common_table, deleted_cache);
-	pars_info_bind_id(info, fts_common_tables[4], deleted_cache);
-
-	/* Move doc_ids that are to be deleted to state being deleted. */
-	graph = fts_parse_sql(NULL, info, fts_init_delete_sql);
-
-	error = fts_eval_sql(optim->trx, graph);
-
-	que_graph_free(graph);
-
-	if (error != DB_SUCCESS) {
-		fts_sql_rollback(optim->trx);
-	} else {
-		fts_sql_commit(optim->trx);
-	}
-
-	optim->del_list_regenerated = TRUE;
-
-	return(error);
+  optim->del_list_regenerated= TRUE;
+  return err;
 }
 
 /*********************************************************************//**
@@ -2218,29 +2030,24 @@ fts_optimize_read_deleted_doc_id_snapshot(
 /*======================================*/
 	fts_optimize_t*	optim)	/*!< in: optimize instance */
 {
-	dberr_t		error;
-
-	optim->fts_common_table.suffix = "BEING_DELETED";
-
 	/* Read the doc_ids to delete. */
-	error = fts_table_fetch_doc_ids(
-		optim->trx, &optim->fts_common_table, optim->to_delete);
+	dberr_t error = fts_table_fetch_doc_ids(
+			  optim->trx, optim->table, "BEING_DELETED",
+			  optim->to_delete);
 
 	if (error == DB_SUCCESS) {
 
 		optim->fts_common_table.suffix = "BEING_DELETED_CACHE";
-
 		/* Read additional doc_ids to delete. */
 		error = fts_table_fetch_doc_ids(
-			optim->trx, &optim->fts_common_table, optim->to_delete);
+			optim->trx, optim->table, "BEING_DELETED_CACHE",
+			optim->to_delete);
 	}
 
 	if (error != DB_SUCCESS) {
-
 		fts_doc_ids_free(optim->to_delete);
 		optim->to_delete = NULL;
 	}
-
 	return(error);
 }
 
@@ -2452,7 +2259,10 @@ fts_optimize_table(
 	// rely on DB_DUPLICATE_KEY to handle corrupting the snapshot.
 
 	/* Check whether there are still records in BEING_DELETED table */
-	if (fts_optimize_being_deleted_count(optim) == 0) {
+	ulint n_rows = 0;
+	error= fts_optimize_being_deleted_count(optim, &n_rows);
+
+	if (error == DB_SUCCESS && n_rows == 0) {
 		/* Take a snapshot of the deleted document ids, they are copied
 		to the BEING_ tables. */
 		error = fts_optimize_create_deleted_doc_id_snapshot(optim);

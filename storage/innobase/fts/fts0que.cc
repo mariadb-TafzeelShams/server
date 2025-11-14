@@ -4005,7 +4005,7 @@ fts_query(
 
 	/* Read the deleted doc_ids, we need these for filtering. */
 	error = fts_table_fetch_doc_ids(
-		NULL, &query.fts_common_table, query.deleted);
+		nullptr, index->table, "DELETED", query.deleted);
 
 	if (error != DB_SUCCESS) {
 		goto func_exit;
@@ -4014,7 +4014,7 @@ fts_query(
 	query.fts_common_table.suffix = "DELETED_CACHE";
 
 	error = fts_table_fetch_doc_ids(
-		NULL, &query.fts_common_table, query.deleted);
+		nullptr, index->table, "DELETED_CACHE", query.deleted);
 
 	if (error != DB_SUCCESS) {
 		goto func_exit;

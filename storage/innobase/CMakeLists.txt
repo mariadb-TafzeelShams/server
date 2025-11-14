@@ -171,6 +171,7 @@ SET(INNOBASE_SOURCES
 	fts/fts0ast.cc
 	fts/fts0blex.cc
 	fts/fts0config.cc
+	fts/fts0exec.cc
 	fts/fts0opt.cc
 	fts/fts0pars.cc
 	fts/fts0que.cc
@@ -239,6 +240,7 @@ SET(INNOBASE_SOURCES
 	include/fsp0types.h
 	include/fts0ast.h
 	include/fts0blex.h
+	include/fts0exec.h
 	include/fts0fts.h
 	include/fts0opt.h
 	include/fts0pars.h

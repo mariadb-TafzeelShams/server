@@ -273,20 +273,18 @@ fts_index_fetch_nodes(
 	MY_ATTRIBUTE((nonnull));
 #define fts_sql_commit(trx) trx_commit_for_mysql(trx)
 #define fts_sql_rollback(trx) (trx)->rollback()
-/******************************************************************//**
-Get value from config table. The caller must ensure that enough
-space is allocated for value to hold the column contents
+
+/** Get value from the config table. The caller must ensure that enough
+space is allocated for value to hold the column contents.
+@param trx      transaction
+@param table    Indexed fts table
+@param name     name of the key
+@param value    value of the key
 @return DB_SUCCESS or error code */
-dberr_t
-fts_config_get_value(
-/*=================*/
-	trx_t*		trx,		/* transaction */
-	fts_table_t*	fts_table,	/*!< in: the indexed FTS table */
-	const char*	name,		/*!< in: get config value for
-					this parameter name */
-	fts_string_t*	value)		/*!< out: value read from
-					config table */
-	MY_ATTRIBUTE((nonnull));
+dberr_t fts_config_get_value(trx_t *trx, const dict_table_t *table,
+                             const char *name, fts_string_t *value)
+                             MY_ATTRIBUTE((nonnull));
+
 /******************************************************************//**
 Get value specific to an FTS index from the config table. The caller
 must ensure that enough space is allocated for value to hold the
@@ -309,7 +307,7 @@ dberr_t
 fts_config_set_value(
 /*=================*/
 	trx_t*		trx,		/*!< transaction */
-	fts_table_t*	fts_table,	/*!< in: the indexed FTS table */
+	const dict_table_t* table,	/*!< in: the indexed FTS table */
 	const char*	name,		/*!< in: get config value for
 					this parameter name */
 	const fts_string_t*
@@ -322,7 +320,7 @@ dberr_t
 fts_config_set_ulint(
 /*=================*/
 	trx_t*		trx,		/*!< in: transaction */
-	fts_table_t*	fts_table,	/*!< in: the indexed FTS table */
+	const dict_table_t*	table,	/*!< in: the indexed FTS table */
 	const char*	name,		/*!< in: param name */
 	ulint		int_value)	/*!< in: value */
 	MY_ATTRIBUTE((nonnull, warn_unused_result));
@@ -372,7 +370,7 @@ dberr_t
 fts_config_get_ulint(
 /*=================*/
 	trx_t*		trx,		/*!< in: transaction */
-	fts_table_t*	fts_table,	/*!< in: the indexed FTS table */
+	const dict_table_t*	table,	/*!< in: the indexed FTS table */
 	const char*	name,		/*!< in: param name */
 	ulint*		int_value)	/*!< out: value */
 	MY_ATTRIBUTE((nonnull));

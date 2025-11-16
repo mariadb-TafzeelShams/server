@@ -11449,6 +11449,7 @@ innobase_fts_load_stopword(
   bool success= fts_load_stopword(table, trx, stopword_table,
                                   THDVAR(thd, ft_enable_stopword), false);
   table->fts->dict_locked= false;
+  DBUG_EXECUTE_IF("fts_load_stopword_fail", success= false;);
   return success;
 }
 

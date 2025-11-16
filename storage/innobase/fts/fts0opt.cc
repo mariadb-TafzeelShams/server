@@ -1653,25 +1653,18 @@ fts_optimize_free(
 	mem_heap_free(heap);
 }
 
-/**********************************************************************//**
-Get the max time optimize should run in millisecs.
+/** Get the max time optimize should run in millisecs.
+@param trx transaction
+@param table user table to be optimized
 @return max optimize time limit in millisecs. */
 static
-ulint
-fts_optimize_get_time_limit(
-/*========================*/
-	trx_t*		trx,			/*!< in: transaction */
-	fts_table_t*	fts_table)		/*!< in: aux table */
+ulint fts_optimize_get_time_limit(trx_t *trx, const dict_table_t *table)
 {
-	ulint	time_limit = 0;
-
-	fts_config_get_ulint(
-		trx, fts_table,
-		FTS_OPTIMIZE_LIMIT_IN_SECS, &time_limit);
-
-	/* FIXME: This is returning milliseconds, while the variable
-	is being stored and interpreted as seconds! */
-	return(time_limit * 1000);
+  ulint	time_limit= 0;
+  fts_config_get_ulint(trx, table, FTS_OPTIMIZE_LIMIT_IN_SECS, &time_limit);
+  /* FIXME: This is returning milliseconds, while the variable
+  is being stored and interpreted as seconds! */
+  return(time_limit * 1000);
 }
 
 /**********************************************************************//**
@@ -1693,7 +1686,7 @@ fts_optimize_words(
 
 	/* Get the time limit from the config table. */
 	fts_optimize_time_limit = fts_optimize_get_time_limit(
-		optim->trx, &optim->fts_common_table);
+		optim->trx, optim->table);
 
 	const time_t start_time = time(NULL);
 

@@ -157,27 +157,6 @@ const  fts_index_selector_t fts_index_selector[] = {
 	{  0 , NULL	 }
 };
 
-/** Default config values for FTS indexes on a table. */
-static const char* fts_config_table_insert_values_sql =
-	"PROCEDURE P() IS\n"
-	"BEGIN\n"
-	"\n"
-	"INSERT INTO $config_table VALUES('"
-		FTS_MAX_CACHE_SIZE_IN_MB "', '256');\n"
-	""
-	"INSERT INTO $config_table VALUES('"
-		FTS_OPTIMIZE_LIMIT_IN_SECS  "', '180');\n"
-	""
-	"INSERT INTO $config_table VALUES ('"
-		FTS_SYNCED_DOC_ID "', '0');\n"
-	""
-	"INSERT INTO $config_table VALUES ('"
-		FTS_TOTAL_DELETED_COUNT "', '0');\n"
-	"" /* Note: 0 == FTS_TABLE_STATE_RUNNING */
-	"INSERT INTO $config_table VALUES ('"
-		FTS_TABLE_STATE "', '0');\n"
-	"END;\n";
-
 /** FTS tokenize parameter for plugin parser */
 struct fts_tokenize_param_t {
 	fts_doc_t*	result_doc;	/*!< Result doc for tokens */
@@ -1893,88 +1872,74 @@ CREATE TABLE $FTS_PREFIX_CONFIG
 @param[in]	skip_doc_id_index	Skip index on doc id
 @return DB_SUCCESS if succeed */
 dberr_t
-fts_create_common_tables(
-	trx_t*		trx,
-	dict_table_t*	table,
-	bool		skip_doc_id_index)
+fts_create_common_tables(trx_t *trx, dict_table_t *table,
+                         bool skip_doc_id_index)
 {
-	dberr_t		error;
-	que_t*		graph;
-	fts_table_t	fts_table;
-	mem_heap_t*	heap = mem_heap_create(1024);
-	pars_info_t*	info;
-	char		fts_name[MAX_FULL_NAME_LEN];
-	char		full_name[sizeof(fts_common_tables) / sizeof(char*)]
-				[MAX_FULL_NAME_LEN];
+  dberr_t error= DB_SUCCESS;
+  char full_name[sizeof(fts_common_tables) / sizeof(char*)][MAX_FULL_NAME_LEN];
+  dict_index_t *index= nullptr;
+  fts_table_t fts_table;
+  FTS_INIT_FTS_TABLE(&fts_table, NULL, FTS_COMMON_TABLE, table);
+  error = fts_drop_common_tables(trx, &fts_table, true);
+  if (error != DB_SUCCESS) return error;
+  mem_heap_t *heap= mem_heap_create(1024);
+  /* Create the FTS tables that are common to an FTS index. */
+  for (ulint i = 0; fts_common_tables[i] != NULL; ++i)
+  {
+    fts_table.suffix = fts_common_tables[i];
+    fts_get_table_name(&fts_table, full_name[i], true);
+    dict_table_t *common_table= fts_create_one_common_table(
+      trx, table, full_name[i], fts_table.suffix, heap);
+    if (!common_table)
+    {
+      trx->error_state = DB_SUCCESS;
+      error = DB_ERROR;
+          mem_heap_free(heap);
+          return error;
+    }
+    mem_heap_empty(heap);
+  }
 
-	dict_index_t*					index = NULL;
+  FTSQueryExecutor executor(trx, nullptr, table, true);
 
-	FTS_INIT_FTS_TABLE(&fts_table, NULL, FTS_COMMON_TABLE, table);
+  /** Does the following insert operation:
+  INSERT INTO $config_table VALUES('"FTS_MAX_CACHE_SIZE_IN_MB"', '256');"
+  INSERT INTO $config_table VALUES('"FTS_OPTIMIZE_LIMIT_IN_SECS"', '180');"
+  INSERT INTO $config_table VALUES ('"FTS_SYNCED_DOC_ID "', '0');"
+  INSERT INTO $config_table VALUES ('"FTS_TOTAL_DELETED_COUNT "', '0');"
+  INSERT INTO $config_table VALUES ('"FTS_TABLE_STATE "', '0');" */
+  error= executor.insert_config_record(FTS_MAX_CACHE_SIZE_IN_MB, "256");
+  if (error == DB_SUCCESS)
+    error= executor.insert_config_record(FTS_OPTIMIZE_LIMIT_IN_SECS, "180");
 
-	error = fts_drop_common_tables(trx, &fts_table, true);
+  if (error == DB_SUCCESS)
+    error= executor.insert_config_record(FTS_SYNCED_DOC_ID, "0");
 
-	if (error != DB_SUCCESS) {
+  if (error == DB_SUCCESS)
+    error= executor.insert_config_record(FTS_TOTAL_DELETED_COUNT, "0");
 
-		goto func_exit;
-	}
+  if (error == DB_SUCCESS)
+    error= executor.insert_config_record(FTS_TABLE_STATE, "0");
 
-	/* Create the FTS tables that are common to an FTS index. */
-	for (ulint i = 0; fts_common_tables[i] != NULL; ++i) {
+  if (error != DB_SUCCESS || skip_doc_id_index) goto func_exit;
 
-		fts_table.suffix = fts_common_tables[i];
-		fts_get_table_name(&fts_table, full_name[i], true);
-		dict_table_t*	common_table = fts_create_one_common_table(
-			trx, table, full_name[i], fts_table.suffix, heap);
+  if (table->versioned())
+  {
+    index= dict_mem_index_create(table, FTS_DOC_ID_INDEX.str, DICT_UNIQUE, 2);
+    dict_mem_index_add_field(index, FTS_DOC_ID.str, 0);
+    dict_mem_index_add_field(index, table->cols[table->vers_end].name(*table).str, 0);
+  }
+  else
+  {
+    index= dict_mem_index_create(table, FTS_DOC_ID_INDEX.str, DICT_UNIQUE, 1);
+    dict_mem_index_add_field(index, FTS_DOC_ID.str, 0);
+  }
 
-		if (!common_table) {
-			trx->error_state = DB_SUCCESS;
-			error = DB_ERROR;
-			goto func_exit;
-		}
-
-		mem_heap_empty(heap);
-	}
-
-	/* Write the default settings to the config table. */
-	info = pars_info_create();
-
-	fts_table.suffix = "CONFIG";
-	fts_get_table_name(&fts_table, fts_name, true);
-	pars_info_bind_id(info, "config_table", fts_name);
-
-	graph = pars_sql(
-		info, fts_config_table_insert_values_sql);
-
-	error = fts_eval_sql(trx, graph);
-
-	que_graph_free(graph);
-
-	if (error != DB_SUCCESS || skip_doc_id_index) {
-
-		goto func_exit;
-	}
-
-	if (table->versioned()) {
-		index = dict_mem_index_create(table,
-					      FTS_DOC_ID_INDEX.str,
-					      DICT_UNIQUE, 2);
-		dict_mem_index_add_field(index, FTS_DOC_ID.str, 0);
-		dict_mem_index_add_field(index, table->cols[table->vers_end].name(*table).str, 0);
-	} else {
-		index = dict_mem_index_create(table,
-					      FTS_DOC_ID_INDEX.str,
-					      DICT_UNIQUE, 1);
-		dict_mem_index_add_field(index, FTS_DOC_ID.str, 0);
-	}
-
-	error =	row_create_index_for_mysql(index, trx, NULL,
-					   FIL_ENCRYPTION_DEFAULT,
-					   FIL_DEFAULT_ENCRYPTION_KEY);
-
+  error= row_create_index_for_mysql(index, trx, NULL, FIL_ENCRYPTION_DEFAULT,
+                                    FIL_DEFAULT_ENCRYPTION_KEY);
 func_exit:
-	mem_heap_free(heap);
-
-	return(error);
+  mem_heap_free(heap);
+  return error;
 }
 
 /** Create one FTS auxiliary index table for an FTS index.
@@ -2439,39 +2404,6 @@ fts_trx_add_op(
 	fts_trx_table_add_op(stmt_ftt, doc_id, state, fts_indexes);
 }
 
-/******************************************************************//**
-Fetch callback that converts a textual document id to a binary value and
-stores it in the given place.
-@return always returns NULL */
-static
-ibool
-fts_fetch_store_doc_id(
-/*===================*/
-	void*		row,			/*!< in: sel_node_t* */
-	void*		user_arg)		/*!< in: doc_id_t* to store
-						doc_id in */
-{
-	int		n_parsed;
-	sel_node_t*	node = static_cast<sel_node_t*>(row);
-	doc_id_t*	doc_id = static_cast<doc_id_t*>(user_arg);
-	dfield_t*	dfield = que_node_get_val(node->select_list);
-	dtype_t*	type = dfield_get_type(dfield);
-	ulint		len = dfield_get_len(dfield);
-
-	char		buf[32];
-
-	ut_a(dtype_get_mtype(type) == DATA_VARCHAR);
-	ut_a(len > 0 && len < sizeof(buf));
-
-	memcpy(buf, dfield_get_data(dfield), len);
-	buf[len] = '\0';
-
-	n_parsed = sscanf(buf, FTS_DOC_ID_FORMAT, doc_id);
-	ut_a(n_parsed == 1);
-
-	return(FALSE);
-}
-
 #ifdef FTS_CACHE_SIZE_DEBUG
 /******************************************************************//**
 Get the max cache size in bytes. If there is an error reading the
@@ -2483,7 +2415,7 @@ ulint
 fts_get_max_cache_size(
 /*===================*/
 	trx_t*		trx,			/*!< in: transaction */
-	fts_table_t*	fts_table)		/*!< in: table instance */
+	const dict_table_t *table)		/*!< in: table */
 {
 	dberr_t		error;
 	fts_string_t	value;
@@ -2499,7 +2431,7 @@ fts_get_max_cache_size(
 	value.f_str = ut_malloc_nokey(value.f_len + 1);
 
 	error = fts_config_get_value(
-		trx, fts_table, FTS_MAX_CACHE_SIZE_IN_MB, &value);
+		trx, table, FTS_MAX_CACHE_SIZE_IN_MB, &value);
 
 	if (UNIV_LIKELY(error == DB_SUCCESS)) {
 		value.f_str[value.f_len] = 0;
@@ -2583,43 +2515,22 @@ dberr_t fts_read_synced_doc_id(const dict_table_t *table,
                                doc_id_t *doc_id,
                                trx_t *trx)
 {
-  dberr_t error;
-  char    table_name[MAX_FULL_NAME_LEN];
-
-  fts_table_t fts_table;
-  fts_table.suffix= "CONFIG";
-  fts_table.table_id= table->id;
-  fts_table.type= FTS_COMMON_TABLE;
-  fts_table.table= table;
   ut_a(table->fts->doc_col != ULINT_UNDEFINED);
-
-  trx->op_info = "update the next FTS document id";
-  pars_info_t *info= pars_info_create();
-  pars_info_bind_function(info, "my_func", fts_fetch_store_doc_id,
-                          doc_id);
-
-  fts_get_table_name(&fts_table, table_name);
-  pars_info_bind_id(info, "config_table", table_name);
-
-  que_t *graph= fts_parse_sql(
-           &fts_table, info,
-           "DECLARE FUNCTION my_func;\n"
-           "DECLARE CURSOR c IS SELECT value FROM $config_table"
-           " WHERE key = 'synced_doc_id' FOR UPDATE;\n"
-           "BEGIN\n"
-           ""
-           "OPEN c;\n"
-           "WHILE 1 = 1 LOOP\n"
-           "  FETCH c INTO my_func();\n"
-           "  IF c % NOTFOUND THEN\n"
-           "    EXIT;\n"
-           "  END IF;\n"
-           "END LOOP;\n"
-           "CLOSE c;");
-
+  trx->op_info= "reading synced FTS document id";
+  FTSQueryExecutor executor(trx, nullptr, table);
+  ConfigReader reader;
   *doc_id= 0;
-  error = fts_eval_sql(trx, graph);
-  que_graph_free(graph);
+  dberr_t error= executor.read_config_with_lock("synced_doc_id", reader);
+  if (error == DB_SUCCESS)
+  {
+    const auto& config_pairs= reader.config_pairs;
+    if (config_pairs.size() == 1)
+    {
+      const std::string& value_str= config_pairs[0].second;
+      int n_parsed= sscanf(value_str.c_str(), FTS_DOC_ID_FORMAT, doc_id);
+      if (n_parsed != 1) error= DB_ERROR;
+    }
+  }
   return error;
 }
 
@@ -2712,74 +2623,42 @@ transaction to update the last document id.
 @param  trx     update trx or null
 @retval DB_SUCCESS if OK */
 dberr_t
-fts_update_sync_doc_id(
-	const dict_table_t*	table,
-	doc_id_t		doc_id,
-	trx_t*			trx)
+fts_update_sync_doc_id(const dict_table_t *table, doc_id_t doc_id, trx_t *trx)
 {
-	byte		id[FTS_MAX_ID_LEN];
-	pars_info_t*	info;
-	fts_table_t	fts_table;
-	ulint		id_len;
-	que_t*		graph = NULL;
-	dberr_t		error;
-	ibool		local_trx = FALSE;
-	fts_cache_t*	cache = table->fts->cache;
-	char		fts_name[MAX_FULL_NAME_LEN];
+  if (srv_read_only_mode) return DB_READ_ONLY;
+  bool local_trx= false;
+  if (!trx)
+  {
+    trx= trx_create();
+    trx_start_internal(trx);
+    trx->op_info= "setting last FTS document id";
+    local_trx= true;
+  }
 
-	if (srv_read_only_mode) {
-		return DB_READ_ONLY;
-	}
+  char id[FTS_MAX_ID_LEN];
+  snprintf(id, sizeof(id), FTS_DOC_ID_FORMAT, doc_id + 1);
 
-	fts_table.suffix = "CONFIG";
-	fts_table.table_id = table->id;
-	fts_table.type = FTS_COMMON_TABLE;
-	fts_table.table = table;
-
-	if (!trx) {
-		trx = trx_create();
-		trx_start_internal(trx);
-
-		trx->op_info = "setting last FTS document id";
-		local_trx = TRUE;
-	}
-
-	info = pars_info_create();
-
-	id_len = (ulint) snprintf(
-		(char*) id, sizeof(id), FTS_DOC_ID_FORMAT, doc_id + 1);
-
-	pars_info_bind_varchar_literal(info, "doc_id", id, id_len);
-
-	fts_get_table_name(&fts_table, fts_name,
-			   table->fts->dict_locked);
-	pars_info_bind_id(info, "table_name", fts_name);
-
-	graph = fts_parse_sql(
-		&fts_table, info,
-		"BEGIN"
-		" UPDATE $table_name SET value = :doc_id"
-		" WHERE key = 'synced_doc_id';");
-
-	error = fts_eval_sql(trx, graph);
-
-	que_graph_free(graph);
-
-	if (local_trx) {
-		if (UNIV_LIKELY(error == DB_SUCCESS)) {
-			fts_sql_commit(trx);
-			cache->synced_doc_id = doc_id;
-		} else {
-			ib::error() << "(" << error << ") while"
-				" updating last doc id for table"
-				<< table->name;
-
-			fts_sql_rollback(trx);
-		}
-		trx->free();
-	}
-
-	return(error);
+  FTSQueryExecutor executor(trx, nullptr,
+                            const_cast<dict_table_t*>(table),
+                            table->fts->dict_locked);
+  fts_cache_t *cache= table->fts->cache;
+  dberr_t error= executor.update_config_record("synced_doc_id", id);
+  if (local_trx)
+  {
+    if (UNIV_LIKELY(error == DB_SUCCESS))
+    {
+      fts_sql_commit(trx);
+      cache->synced_doc_id = doc_id;
+    }
+    else
+    {
+      sql_print_error("InnoDB: ( %s ) while updating last doc id for table %s",
+                      ut_strerr(error), table->name.m_name);
+      fts_sql_rollback(trx);
+    }
+    trx->free();
+  }
+  return error;
 }
 
 /*********************************************************************//**
@@ -4933,8 +4812,6 @@ fts_update_max_cache_size(
 
 	trx = trx_create();
 
-	FTS_INIT_FTS_TABLE(&fts_table, "CONFIG", FTS_COMMON_TABLE, sync->table);
-
 	/* The size returned is in bytes. */
 	sync->max_cache_size = fts_get_max_cache_size(trx, &fts_table);
 
@@ -5779,7 +5656,6 @@ fts_load_stopword(
 	bool		reload)			/*!< in: Whether it is
 						for reloading FTS table */
 {
-	fts_table_t	fts_table;
 	fts_string_t	str;
 	dberr_t		error = DB_SUCCESS;
 	ulint		use_stopword;
@@ -5787,8 +5663,6 @@ fts_load_stopword(
 	const char*	stopword_to_use = NULL;
 	ibool		new_trx = FALSE;
 	byte		str_buffer[MAX_FULL_NAME_LEN + 1];
-
-	FTS_INIT_FTS_TABLE(&fts_table, "CONFIG", FTS_COMMON_TABLE, table);
 
 	cache = table->fts->cache;
 
@@ -5810,12 +5684,12 @@ fts_load_stopword(
 	/* First check whether stopword filtering is turned off */
 	if (reload) {
 		error = fts_config_get_ulint(
-			trx, &fts_table, FTS_USE_STOPWORD, &use_stopword);
+			trx, table, FTS_USE_STOPWORD, &use_stopword);
 	} else {
 		use_stopword = (ulint) stopword_is_on;
 
 		error = fts_config_set_ulint(
-			trx, &fts_table, FTS_USE_STOPWORD, use_stopword);
+			trx, table, FTS_USE_STOPWORD, use_stopword);
 	}
 
 	if (error != DB_SUCCESS) {
@@ -5837,7 +5711,7 @@ fts_load_stopword(
 		str.f_len = sizeof(str_buffer) - 1;
 
 		error = fts_config_get_value(
-			trx, &fts_table, FTS_STOPWORD_TABLE_NAME, &str);
+			trx, table, FTS_STOPWORD_TABLE_NAME, &str);
 
 		if (error != DB_SUCCESS) {
 			goto cleanup;
@@ -5861,7 +5735,7 @@ fts_load_stopword(
 			str.f_len = strlen(stopword_to_use);
 
 			error = fts_config_set_value(
-				trx, &fts_table, FTS_STOPWORD_TABLE_NAME, &str);
+				trx, table, FTS_STOPWORD_TABLE_NAME, &str);
 		}
 	} else {
 		/* Load system default stopword list */

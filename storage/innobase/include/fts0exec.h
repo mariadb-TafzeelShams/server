@@ -217,4 +217,11 @@ public:
   void clear() { doc_ids.clear(); }
 };
 
+/** Callback class for reading FTS config table records */
+class ConfigReader : public RecordCallback
+{
+public:
+  std::vector<std::pair<std::string, std::string>> config_pairs;
+  ConfigReader();
+};
 #endif /* INNOBASE_FTS0QUERY_H */

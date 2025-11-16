@@ -3118,7 +3118,6 @@ i_s_fts_config_fill(
 	Field**			fields;
 	TABLE*			table = (TABLE*) tables->table;
 	trx_t*			trx;
-	fts_table_t		fts_table;
 	dict_table_t*		user_table;
 	ulint			i = 0;
 	dict_index_t*		index = NULL;
@@ -3152,8 +3151,6 @@ i_s_fts_config_fill(
 	trx = trx_create();
 	trx->op_info = "Select for FTS CONFIG TABLE";
 
-	FTS_INIT_FTS_TABLE(&fts_table, "CONFIG", FTS_COMMON_TABLE, user_table);
-
 	if (!ib_vector_is_empty(user_table->fts->indexes)) {
 		index = (dict_index_t*) ib_vector_getp_const(
 				user_table->fts->indexes, 0);
@@ -3180,7 +3177,7 @@ i_s_fts_config_fill(
 			key_name = (char*) fts_config_key[i];
 		}
 
-		fts_config_get_value(trx, &fts_table, key_name, &value);
+		fts_config_get_value(trx, user_table, key_name, &value);
 
 		if (allocated) {
 			ut_free(key_name);

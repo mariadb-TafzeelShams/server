@@ -17,6 +17,7 @@
 */
 
 #include "opt_hints_parser.h"
+#include "mysqld.h"
 #include "sql_error.h"
 #include "mysqld_error.h"
 #include "sql_class.h"
@@ -50,6 +51,9 @@ Opt_hints_table *get_table_hints(Parse_context *pc,
 
 void append_table_name(THD *thd, String *str, const LEX_CSTRING &table_name,
                        const LEX_CSTRING &qb_name);
+
+int cmp_lex_string_nchars(const LEX_CSTRING &s, const LEX_CSTRING &t,
+                          const CHARSET_INFO *cs, size_t nchars);
 
 static const Lex_ident_sys null_ident_sys;
 
@@ -781,8 +785,18 @@ bool Parser::Qb_name_hint::resolve(Parse_context *pc) const
 
   const Lex_ident_sys qb_name_sys= Query_block_name::to_ident_sys(pc->thd);
 
-  if (qb->get_name().str ||                        // QB name is already set
-      qb->get_parent()->find_by_name(qb_name_sys)) // Name is already used
+  // (1) QB name is already set
+  // (2) Name is already used
+
+  // OLEGS: do we need a separate warning message for this case?
+  // (3) QB name conflicts with implicit name format
+  LEX_CSTRING impl_name_prefix {IMPLICIT_QB_NAME_PREFIX,
+                             sizeof(IMPLICIT_QB_NAME_PREFIX)-1};
+  if (qb->get_name().str ||                                     // (1)
+      qb->get_parent()->find_by_name(qb_name_sys) ||            // (2)
+      !cmp_lex_string_nchars(qb_name_sys, impl_name_prefix,
+                             system_charset_info,
+                             impl_name_prefix.length))    // (3)
   {
     print_warn(pc->thd, ER_WARN_CONFLICTING_HINT, QB_NAME_HINT_ENUM, true,
                &qb_name_sys, nullptr, nullptr, nullptr);
@@ -1157,7 +1171,7 @@ bool Parser::Join_order_hint::resolve(Parse_context *pc)
         Parser::Table_name_and_Qb(table.to_ident_sys(pc->thd), Lex_ident_sys());
       if (!tbl_qb)
         return true;
-      table_names.push_back(tbl_qb, pc->mem_root); // OLEGS: not used besides .is_empty()?
+      table_names.push_back(tbl_qb, pc->mem_root);
     }
   }
   else
@@ -1172,7 +1186,7 @@ bool Parser::Join_order_hint::resolve(Parse_context *pc)
         new (pc->mem_root) Parser::Table_name_and_Qb(
           table.Table_name::to_ident_sys(pc->thd),
           table.Query_block_name::to_ident_sys(pc->thd));
-      table_names.push_back(tbl_qb, pc->mem_root); // OLEGS: not used besides .is_empty()?
+      table_names.push_back(tbl_qb, pc->mem_root);
     }
   }
 

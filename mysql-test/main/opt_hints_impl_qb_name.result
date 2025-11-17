@@ -7,12 +7,11 @@ test.t1	analyze	status	Engine-independent statistics collected
 test.t1	analyze	status	Table is already up to date
 test.t2	analyze	status	Engine-independent statistics collected
 test.t2	analyze	status	OK
-# OLEGS todo: 1. check with derived_merge=OFF
-# OLEGS todo: 2. join_order hints don't resolve
 # OLEGS todo: 3. check other table-level hints
 # OLEGS todo: 4. More variety of hints
-# OLEGS todo: 5. Check CTE
 # OLEGS todo: 6. Possible conflicts with explicit QB names
+# OLEGS todo: 7. Implement views
+# OLEGS todo: 7. MERGE/NO_MERGE
 
 ================================================================
 set optimizer_switch= 'derived_merge=on';
@@ -55,12 +54,12 @@ id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
 1	SIMPLE	t1	ALL	NULL	NULL	NULL	NULL	1000	Using where
 1	SIMPLE	t1	range	idx_a,idx_ab	idx_a	5	NULL	4	Using index condition; Using where; Using join buffer (flat, BNL join)
 # Nested derived tables
-explain select /*+ no_index(t1@qb__dt1)*/ * from
+explain select /*+ no_bnl(t1@qb__dt2)*/ * from
 (select count(*) from t1, (select * from t1 where a < 5) DT1) as DT2;
 id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
 1	PRIMARY	<derived2>	ALL	NULL	NULL	NULL	NULL	4000	
-2	DERIVED	t1	ALL	NULL	NULL	NULL	NULL	1000	Using where
-2	DERIVED	t1	index	NULL	idx_a	5	NULL	1000	Using index; Using join buffer (flat, BNL join)
+2	DERIVED	t1	range	idx_a,idx_ab	idx_a	5	NULL	4	Using where; Using index
+2	DERIVED	t1	index	NULL	idx_a	5	NULL	1000	Using index
 explain select /*+ no_index(t1@qb__DT2)*/ * from
 (select count(*) from t1, (select * from t1 where a < 5) DT1) as DT2;
 id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
@@ -68,12 +67,12 @@ id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
 2	DERIVED	t1	range	idx_a,idx_ab	idx_a	5	NULL	4	Using where; Using index
 2	DERIVED	t1	ALL	NULL	NULL	NULL	NULL	1000	Using join buffer (flat, BNL join)
 # Both hints are applied
-explain select /*+ no_index(t1@qb__dt1) no_index(t1@qb__dt2)*/ * from
+explain select /*+ no_index(t1@qb__dt1) no_bnl(t1@qb__dt2)*/ * from
 (select count(*) from t1, (select * from t1 where a < 5) DT1) as DT2;
 id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
 1	PRIMARY	<derived2>	ALL	NULL	NULL	NULL	NULL	4000	
 2	DERIVED	t1	ALL	NULL	NULL	NULL	NULL	1000	Using where
-2	DERIVED	t1	ALL	NULL	NULL	NULL	NULL	1000	Using join buffer (flat, BNL join)
+2	DERIVED	t1	index	NULL	idx_a	5	NULL	1000	Using index
 # Nested derived tables with ambiguous names
 explain select * from
 (select count(*) from t1, (select * from t1 where a < 5) T1) as T1;
@@ -109,6 +108,69 @@ id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
 NULL	UNION RESULT	<union2,3>	ALL	NULL	NULL	NULL	NULL	NULL	
 Warnings:
 Warning	4244	Implicit query block name `qb__t1` is not supported for derived tables with UNION/EXCEPT/INTERSECT and is ignored for NO_INDEX hint
+# ======================================
+# Test CTEs
+# By default BNL and index access to t1 is used.
+explain
+with cte as (select count(*) from t1, (select * from t1 where a < 5) DT1)
+select * from cte;
+id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
+1	PRIMARY	<derived2>	ALL	NULL	NULL	NULL	NULL	4000	
+2	DERIVED	t1	range	idx_a,idx_ab	idx_a	5	NULL	4	Using where; Using index
+2	DERIVED	t1	index	NULL	idx_a	5	NULL	1000	Using index; Using join buffer (flat, BNL join)
+explain
+with cte as (select count(*) from t1, (select * from t1 where a < 5) DT1)
+select /*+ no_bnl(t1@qb__cte)*/ * from cte;
+id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
+1	PRIMARY	<derived2>	ALL	NULL	NULL	NULL	NULL	4000	
+2	DERIVED	t1	range	idx_a,idx_ab	idx_a	5	NULL	4	Using where; Using index
+2	DERIVED	t1	index	NULL	idx_a	5	NULL	1000	Using index
+explain
+with cte as (select count(*) from t1, (select * from t1 where a < 5) DT1)
+select /*+ no_bnl(@qb__cte)*/ * from cte;
+id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
+1	PRIMARY	<derived2>	ALL	NULL	NULL	NULL	NULL	4000	
+2	DERIVED	t1	range	idx_a,idx_ab	idx_a	5	NULL	4	Using where; Using index
+2	DERIVED	t1	index	NULL	idx_a	5	NULL	1000	Using index
+explain
+with cte as (select count(*) from t1, (select * from t1 where a < 5) DT1)
+select /*+ no_index(t1@qb__dt1)*/ * from cte;
+id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
+1	PRIMARY	<derived2>	ALL	NULL	NULL	NULL	NULL	4000	
+2	DERIVED	t1	ALL	NULL	NULL	NULL	NULL	1000	Using where
+2	DERIVED	t1	index	NULL	idx_a	5	NULL	1000	Using index; Using join buffer (flat, BNL join)
+explain
+with cte as (select count(*) from t1, (select * from t1 where a < 5) DT1)
+select /*+ no_index(t1@qb__dt1 idx_a) no_bnl(@qb__cte)*/ * from cte;
+id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
+1	PRIMARY	<derived2>	ALL	NULL	NULL	NULL	NULL	4000	
+2	DERIVED	t1	range	idx_ab	idx_ab	5	NULL	4	Using where; Using index
+2	DERIVED	t1	index	NULL	idx_a	5	NULL	1000	Using index
+# ======================================
+# Test views
+create view v1 as select * from t1 where a < 100;
+# Default execution plan
+explain select *
+from v1, v1 as v2 where v1.a = v2.a and v1.a < 3;
+id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
+1	SIMPLE	t1	range	idx_a,idx_ab	idx_a	5	NULL	2	Using index condition
+1	SIMPLE	t1	ref	idx_a,idx_ab	idx_a	5	test.t1.a	1	
+explain select /*+ index(t1@`qb__v1` idx_ab) no_index(t1@`qb__v2`)*/ *
+from v1, v1 as v2 where v1.a = v2.a and v1.a < 3;
+id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
+1	SIMPLE	t1	range	idx_ab	idx_ab	5	NULL	2	Using index condition
+1	SIMPLE	t1	ALL	NULL	NULL	NULL	NULL	1000	Using where; Using join buffer (flat, BNL join)
+# Nested views
+create view v3 as select * from v1 where a < 300;
+# Default execution plan
+explain select * from v3;
+id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
+1	SIMPLE	t1	range	idx_a,idx_ab	idx_a	5	NULL	98	Using index condition
+# Addressing an object inside a nested view
+explain select /*+ index(t1@`qb__v1` idx_ab)*/ * from v3;
+id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
+1	SIMPLE	t1	range	idx_ab	idx_ab	5	NULL	98	Using index condition
+drop view v1, v3;
 
 ================================================================
 set optimizer_switch= 'derived_merge=off';
@@ -160,13 +222,13 @@ id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
 3	DERIVED	t1	range	idx_a,idx_ab	idx_a	5	NULL	4	Using index condition
 2	DERIVED	t1	ALL	NULL	NULL	NULL	NULL	1000	Using where
 # Nested derived tables
-explain select /*+ no_index(t1@qb__dt1)*/ * from
+explain select /*+ no_bnl(t1@qb__dt2)*/ * from
 (select count(*) from t1, (select * from t1 where a < 5) DT1) as DT2;
 id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
 1	PRIMARY	<derived2>	ALL	NULL	NULL	NULL	NULL	4000	
 2	DERIVED	<derived3>	ALL	NULL	NULL	NULL	NULL	4	
-2	DERIVED	t1	index	NULL	idx_a	5	NULL	1000	Using index; Using join buffer (flat, BNL join)
-3	DERIVED	t1	ALL	NULL	NULL	NULL	NULL	1000	Using where
+2	DERIVED	t1	index	NULL	idx_a	5	NULL	1000	Using index
+3	DERIVED	t1	range	idx_a,idx_ab	idx_a	5	NULL	4	Using index condition
 explain select /*+ no_index(t1@qb__DT2)*/ * from
 (select count(*) from t1, (select * from t1 where a < 5) DT1) as DT2;
 id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
@@ -175,12 +237,12 @@ id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
 2	DERIVED	t1	ALL	NULL	NULL	NULL	NULL	1000	Using join buffer (flat, BNL join)
 3	DERIVED	t1	range	idx_a,idx_ab	idx_a	5	NULL	4	Using index condition
 # Both hints are applied
-explain select /*+ no_index(t1@qb__dt1) no_index(t1@qb__dt2)*/ * from
+explain select /*+ no_index(t1@qb__dt1) no_bnl(t1@qb__dt2)*/ * from
 (select count(*) from t1, (select * from t1 where a < 5) DT1) as DT2;
 id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
 1	PRIMARY	<derived2>	ALL	NULL	NULL	NULL	NULL	4000	
 2	DERIVED	<derived3>	ALL	NULL	NULL	NULL	NULL	4	
-2	DERIVED	t1	ALL	NULL	NULL	NULL	NULL	1000	Using join buffer (flat, BNL join)
+2	DERIVED	t1	index	NULL	idx_a	5	NULL	1000	Using index
 3	DERIVED	t1	ALL	NULL	NULL	NULL	NULL	1000	Using where
 # Nested derived tables with ambiguous names
 explain select * from
@@ -219,5 +281,73 @@ id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
 NULL	UNION RESULT	<union2,3>	ALL	NULL	NULL	NULL	NULL	NULL	
 Warnings:
 Warning	4244	Implicit query block name `qb__t1` is not supported for derived tables with UNION/EXCEPT/INTERSECT and is ignored for NO_INDEX hint
+# ======================================
+# Test CTEs
+# By default BNL and index access to t1 is used.
+explain
+with cte as (select count(*) from t1, (select * from t1 where a < 5) DT1)
+select * from cte;
+id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
+1	PRIMARY	<derived2>	ALL	NULL	NULL	NULL	NULL	4000	
+2	DERIVED	<derived3>	ALL	NULL	NULL	NULL	NULL	4	
+2	DERIVED	t1	index	NULL	idx_a	5	NULL	1000	Using index; Using join buffer (flat, BNL join)
+3	DERIVED	t1	range	idx_a,idx_ab	idx_a	5	NULL	4	Using index condition
+explain
+with cte as (select count(*) from t1, (select * from t1 where a < 5) DT1)
+select /*+ no_bnl(t1@qb__cte)*/ * from cte;
+id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
+1	PRIMARY	<derived2>	ALL	NULL	NULL	NULL	NULL	4000	
+2	DERIVED	<derived3>	ALL	NULL	NULL	NULL	NULL	4	
+2	DERIVED	t1	index	NULL	idx_a	5	NULL	1000	Using index
+3	DERIVED	t1	range	idx_a,idx_ab	idx_a	5	NULL	4	Using index condition
+explain
+with cte as (select count(*) from t1, (select * from t1 where a < 5) DT1)
+select /*+ no_bnl(@qb__cte)*/ * from cte;
+id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
+1	PRIMARY	<derived2>	ALL	NULL	NULL	NULL	NULL	4000	
+2	DERIVED	<derived3>	ALL	NULL	NULL	NULL	NULL	4	
+2	DERIVED	t1	index	NULL	idx_a	5	NULL	1000	Using index
+3	DERIVED	t1	range	idx_a,idx_ab	idx_a	5	NULL	4	Using index condition
+explain
+with cte as (select count(*) from t1, (select * from t1 where a < 5) DT1)
+select /*+ no_index(t1@qb__dt1)*/ * from cte;
+id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
+1	PRIMARY	<derived2>	ALL	NULL	NULL	NULL	NULL	4000	
+2	DERIVED	<derived3>	ALL	NULL	NULL	NULL	NULL	4	
+2	DERIVED	t1	index	NULL	idx_a	5	NULL	1000	Using index; Using join buffer (flat, BNL join)
+3	DERIVED	t1	ALL	NULL	NULL	NULL	NULL	1000	Using where
+explain
+with cte as (select count(*) from t1, (select * from t1 where a < 5) DT1)
+select /*+ no_index(t1@qb__dt1 idx_a) no_bnl(@qb__cte)*/ * from cte;
+id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
+1	PRIMARY	<derived2>	ALL	NULL	NULL	NULL	NULL	4000	
+2	DERIVED	<derived3>	ALL	NULL	NULL	NULL	NULL	4	
+2	DERIVED	t1	index	NULL	idx_a	5	NULL	1000	Using index
+3	DERIVED	t1	range	idx_ab	idx_ab	5	NULL	4	Using index condition
+# ======================================
+# Test views
+create view v1 as select * from t1 where a < 100;
+# Default execution plan
+explain select *
+from v1, v1 as v2 where v1.a = v2.a and v1.a < 3;
+id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
+1	SIMPLE	t1	range	idx_a,idx_ab	idx_a	5	NULL	2	Using index condition
+1	SIMPLE	t1	ref	idx_a,idx_ab	idx_a	5	test.t1.a	1	
+explain select /*+ index(t1@`qb__v1` idx_ab) no_index(t1@`qb__v2`)*/ *
+from v1, v1 as v2 where v1.a = v2.a and v1.a < 3;
+id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
+1	SIMPLE	t1	range	idx_ab	idx_ab	5	NULL	2	Using index condition
+1	SIMPLE	t1	ALL	NULL	NULL	NULL	NULL	1000	Using where; Using join buffer (flat, BNL join)
+# Nested views
+create view v3 as select * from v1 where a < 300;
+# Default execution plan
+explain select * from v3;
+id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
+1	SIMPLE	t1	range	idx_a,idx_ab	idx_a	5	NULL	98	Using index condition
+# Addressing an object inside a nested view
+explain select /*+ index(t1@`qb__v1` idx_ab)*/ * from v3;
+id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
+1	SIMPLE	t1	range	idx_ab	idx_ab	5	NULL	98	Using index condition
+drop view v1, v3;
 set optimizer_switch= default;
 drop table t1, t2;

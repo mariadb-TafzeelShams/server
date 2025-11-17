@@ -127,6 +127,8 @@
 struct LEX;
 struct TABLE;
 
+const char IMPLICIT_QB_NAME_PREFIX[]= "qb__";
+
 using Key_map = Bitmap<MAX_INDEXES>;
 
 struct st_opt_hint_info

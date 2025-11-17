@@ -84,6 +84,25 @@ int cmp_lex_string(const LEX_CSTRING &s, const LEX_CSTRING &t,
                                    (const uchar*)t.str, t.length);
 }
 
+/*
+  Compare LEX_CSTRING objects using character count limit.
+
+  @param s      The 1st string
+  @param t      The 2nd string
+  @param cs     Pointer to character set
+  @param nchars Maximum number of characters to compare
+
+  @return  0 if strings are equal
+           1 if s is greater
+          -1 if t is greater
+*/
+
+int cmp_lex_string_nchars(const LEX_CSTRING &s, const LEX_CSTRING &t,
+                          const CHARSET_INFO *cs, size_t nchars)
+{
+  return cs->coll->strnncollsp_nchars(cs, (const uchar*)s.str, s.length,
+                                   (const uchar*)t.str, t.length, nchars, 0);
+}
 
 /*
   This is a version of push_warning_printf() guaranteeing no escalation of
@@ -322,11 +341,10 @@ static std::pair<implicit_qb_result, Opt_hints_qb*>
 
     // Check if the alias matches the implicit QB name pattern
     LEX_CSTRING implicit_name;
-    const char FORMAT_PREFIX[]= "qb__";
-    char buff[sizeof(FORMAT_PREFIX) + NAME_CHAR_LEN];
+    char buff[sizeof(IMPLICIT_QB_NAME_PREFIX) + NAME_CHAR_LEN];
     implicit_name.str= buff;
     implicit_name.length= snprintf(buff, sizeof(buff), "%s%s",
-                                   FORMAT_PREFIX, tbl->alias.str);
+                                   IMPLICIT_QB_NAME_PREFIX, tbl->alias.str);
     if (cmp_lex_string(implicit_name, qb_name, system_charset_info))
       continue;  // not a match, continue to next table
     

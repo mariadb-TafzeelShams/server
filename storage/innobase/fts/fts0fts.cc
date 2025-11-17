@@ -3671,76 +3671,19 @@ fts_doc_fetch_by_doc_id(
 	return(error);
 }
 
-/*********************************************************************//**
-Write out a single word's data as new entry/entries in the INDEX table.
-@return DB_SUCCESS if all OK. */
-dberr_t
-fts_write_node(
-/*===========*/
-	trx_t*		trx,			/*!< in: transaction */
-	que_t**		graph,			/*!< in: query graph */
-	fts_table_t*	fts_table,		/*!< in: aux table */
-	fts_string_t*	word,			/*!< in: word in UTF-8 */
-	fts_node_t*	node)			/*!< in: node columns */
+/** Write out a single word's data as new entry/entries in the INDEX table.
+@param executor FTS Query Executor
+@param selected auxiliary index number
+@param aux_data auxiliary table data
+@return DB_SUCCESS if all OK or error code */
+dberr_t fts_write_node(FTSQueryExecutor *executor, uint8_t selected,
+                       const fts_aux_data_t *aux_data)
 {
-	pars_info_t*	info;
-	dberr_t		error;
-	ib_uint32_t	doc_count;
-	time_t		start_time;
-	doc_id_t	last_doc_id;
-	doc_id_t	first_doc_id;
-	char		table_name[MAX_FULL_NAME_LEN];
-
-	ut_a(node->ilist != NULL);
-
-	if (*graph) {
-		info = (*graph)->info;
-	} else {
-		info = pars_info_create();
-
-		fts_get_table_name(fts_table, table_name);
-		pars_info_bind_id(info, "index_table_name", table_name);
-	}
-
-	pars_info_bind_varchar_literal(info, "token", word->f_str, word->f_len);
-
-	/* Convert to "storage" byte order. */
-	fts_write_doc_id((byte*) &first_doc_id, node->first_doc_id);
-	fts_bind_doc_id(info, "first_doc_id", &first_doc_id);
-
-	/* Convert to "storage" byte order. */
-	fts_write_doc_id((byte*) &last_doc_id, node->last_doc_id);
-	fts_bind_doc_id(info, "last_doc_id", &last_doc_id);
-
-	ut_a(node->last_doc_id >= node->first_doc_id);
-
-	/* Convert to "storage" byte order. */
-	mach_write_to_4((byte*) &doc_count, node->doc_count);
-	pars_info_bind_int4_literal(
-		info, "doc_count", (const ib_uint32_t*) &doc_count);
-
-	/* Set copy_name to FALSE since it's a static. */
-	pars_info_bind_literal(
-		info, "ilist", node->ilist, node->ilist_size,
-		DATA_BLOB, DATA_BINARY_TYPE);
-
-	if (!*graph) {
-
-		*graph = fts_parse_sql(
-			fts_table,
-			info,
-			"BEGIN\n"
-			"INSERT INTO $index_table_name VALUES"
-			" (:token, :first_doc_id,"
-			"  :last_doc_id, :doc_count, :ilist);");
-	}
-
-	start_time = time(NULL);
-	error = fts_eval_sql(trx, *graph);
-	elapsed_time += time(NULL) - start_time;
-	++n_nodes;
-
-	return(error);
+  time_t start_time = time(NULL);
+  dberr_t error= executor->insert_aux_record(selected, aux_data);
+  elapsed_time += time(NULL) - start_time;
+  ++n_nodes;
+  return error;
 }
 
 /** Sort an array of doc_id */
@@ -3776,104 +3719,63 @@ fts_sync_add_deleted_cache(fts_sync_t *sync, ib_vector_t *doc_ids)
 @param[in]	unlock_cache	whether unlock cache when write node
 @return DB_SUCCESS if all went well else error code */
 static MY_ATTRIBUTE((nonnull, warn_unused_result))
-dberr_t
-fts_sync_write_words(
-	trx_t*			trx,
-	fts_index_cache_t*	index_cache,
-	bool			unlock_cache)
+dberr_t fts_sync_write_words(trx_t *trx, fts_index_cache_t *index_cache,
+                             bool unlock_cache)
 {
-	fts_table_t	fts_table;
-	ulint		n_nodes = 0;
-	ulint		n_words = 0;
-	const ib_rbt_node_t* rbt_node;
-	dberr_t		error = DB_SUCCESS;
-	ibool		print_error = FALSE;
-	dict_table_t*	table = index_cache->index->table;
+  dict_table_t *table= index_cache->index->table;
+  FTSQueryExecutor executor(trx, index_cache->index, table);
+  ulint n_words= rbt_size(index_cache->words);
+  bool print_error= false;
+  dberr_t error= DB_SUCCESS;
+  for (const ib_rbt_node_t *rbt_node= rbt_first(index_cache->words);
+       rbt_node; rbt_node = rbt_next(index_cache->words, rbt_node))
+  {
+    fts_tokenizer_word_t *word= rbt_value(fts_tokenizer_word_t, rbt_node);
+    DBUG_EXECUTE_IF("fts_instrument_write_words_before_select_index",
+                    std::this_thread::sleep_for(
+                      std::chrono::milliseconds(300)););
+    uint8_t selected= fts_select_index(
+      index_cache->charset, word->text.f_str, word->text.f_len);
+  
+    for (ulint i = 0; i < ib_vector_size(word->nodes); ++i)
+    {
+      fts_node_t* fts_node=
+        static_cast<fts_node_t*>(ib_vector_get(word->nodes, i));
+      if (fts_node->synced) continue;
+      else fts_node->synced= true;
+      /* FIXME: we need to handle the error properly. */
+      if (error == DB_SUCCESS)
+      {
+        if (unlock_cache) mysql_mutex_unlock(&table->fts->cache->lock);
+        fts_aux_data_t aux_data((const char*)word->text.f_str, word->text.f_len,
+                                fts_node->first_doc_id, fts_node->last_doc_id,
+                                static_cast<uint32_t>(fts_node->doc_count), fts_node->ilist,
+                                fts_node->ilist_size);
+        error= fts_write_node(&executor, selected, &aux_data);
+        DEBUG_SYNC_C("fts_write_node");
+        DBUG_EXECUTE_IF("fts_write_node_crash", DBUG_SUICIDE(););
+        DBUG_EXECUTE_IF("fts_instrument_sync_sleep",
+                        std::this_thread::sleep_for(std::chrono::seconds(1)););
 
-	FTS_INIT_INDEX_TABLE(
-		&fts_table, NULL, FTS_INDEX_TABLE, index_cache->index);
+        if (unlock_cache) mysql_mutex_lock(&table->fts->cache->lock);
+      }
 
-	n_words = rbt_size(index_cache->words);
+      n_nodes += ib_vector_size(word->nodes);
 
-	/* We iterate over the entire tree, even if there is an error,
-	since we want to free the memory used during caching. */
-	for (rbt_node = rbt_first(index_cache->words);
-	     rbt_node;
-	     rbt_node = rbt_next(index_cache->words, rbt_node)) {
+      if (UNIV_UNLIKELY(error != DB_SUCCESS) && !print_error)
+      {
+        sql_print_error("InnoDB: ( %s ) writing word node to FTS auxiliary "
+                        "index table %s", ut_strerr(error),
+                        table->name.m_name);
+        print_error= true;
+      }
+    }
+  }
 
-		ulint			i;
-		ulint			selected;
-		fts_tokenizer_word_t*	word;
-
-		word = rbt_value(fts_tokenizer_word_t, rbt_node);
-
-		DBUG_EXECUTE_IF(
-			"fts_instrument_write_words_before_select_index",
-			std::this_thread::sleep_for(
-				std::chrono::milliseconds(300)););
-
-		selected = fts_select_index(
-			index_cache->charset, word->text.f_str,
-			word->text.f_len);
-
-		fts_table.suffix = fts_get_suffix(selected);
-
-		/* We iterate over all the nodes even if there was an error */
-		for (i = 0; i < ib_vector_size(word->nodes); ++i) {
-
-			fts_node_t* fts_node = static_cast<fts_node_t*>(
-				ib_vector_get(word->nodes, i));
-
-			if (fts_node->synced) {
-				continue;
-			} else {
-				fts_node->synced = true;
-			}
-
-			/*FIXME: we need to handle the error properly. */
-			if (error == DB_SUCCESS) {
-				if (unlock_cache) {
-					mysql_mutex_unlock(
-						&table->fts->cache->lock);
-				}
-
-				error = fts_write_node(
-					trx,
-					&index_cache->ins_graph[selected],
-					&fts_table, &word->text, fts_node);
-
-				DEBUG_SYNC_C("fts_write_node");
-				DBUG_EXECUTE_IF("fts_write_node_crash",
-					DBUG_SUICIDE(););
-
-				DBUG_EXECUTE_IF(
-					"fts_instrument_sync_sleep",
-					std::this_thread::sleep_for(
-						std::chrono::seconds(1)););
-
-				if (unlock_cache) {
-					mysql_mutex_lock(
-						&table->fts->cache->lock);
-				}
-			}
-		}
-
-		n_nodes += ib_vector_size(word->nodes);
-
-		if (UNIV_UNLIKELY(error != DB_SUCCESS) && !print_error) {
-			ib::error() << "(" << error << ") writing"
-				" word node to FTS auxiliary index table "
-				<< table->name;
-			print_error = TRUE;
-		}
-	}
-
-	if (UNIV_UNLIKELY(fts_enable_diag_print)) {
-		printf("Avg number of nodes: %lf\n",
-		       (double) n_nodes / (double) (n_words > 1 ? n_words : 1));
-	}
-
-	return(error);
+  if (UNIV_UNLIKELY(fts_enable_diag_print))
+    printf("Avg number of nodes: %lf\n",
+           (double) n_nodes / (double) (n_words > 1 ? n_words : 1));
+  return error;  
 }
 
 /*********************************************************************//**

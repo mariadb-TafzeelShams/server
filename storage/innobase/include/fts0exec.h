@@ -224,4 +224,83 @@ public:
   std::vector<std::pair<std::string, std::string>> config_pairs;
   ConfigReader();
 };
+
+/** Type alias for FTS record processor function */
+using FTSRecordProcessor= std::function<
+  bool(const rec_t*, const dict_index_t*, const rec_offs*, void*)>;
+
+/** Comparison modes for AuxRecordReader */
+enum class AuxCompareMode
+{
+  /* >= comparison (range scan from word) */
+  GREATER_EQUAL,
+  /* > comparison (exclude exact match) */
+  GREATER,
+  /* LIKE pattern matching (prefix match) */
+  LIKE,
+  /* = comparison (exact match) */
+  EQUAL
+};
+
+/** Callback class for reading FTS auxiliary index table records */
+class AuxRecordReader : public RecordCallback
+{
+private:
+  void* user_arg;
+  ulint* total_memory;
+  AuxCompareMode compare_mode;
+
+private:
+  /** FTS-specific record comparison logic */
+  RecordCompareAction compare_record(
+    const dtuple_t* search_tuple, const rec_t* rec,
+    const dict_index_t* index, const rec_offs* offsets) noexcept;
+
+public:
+  /** Default word processor for FTS auxiliary table records */
+  bool default_word_processor(const rec_t* rec, const dict_index_t* index,
+                              const rec_offs* offsets, void* user_arg);
+
+  /* Constructor with custom processor */
+  template<typename ProcessorFunc>
+  AuxRecordReader(void* user_data,
+                  ProcessorFunc proc_func,
+                  AuxCompareMode mode= AuxCompareMode::GREATER_EQUAL)
+    : RecordCallback(
+        [this, proc_func](const rec_t* rec, const dict_index_t* index,
+                          const rec_offs* offsets) -> bool
+	{
+          return proc_func(rec, index, offsets, this->user_arg);
+        },
+        [this](const dtuple_t* search_tuple, const rec_t* rec,
+               const dict_index_t* index, const rec_offs* offsets)
+        -> RecordCompareAction
+        {
+          return this->compare_record(search_tuple, rec, index, offsets);
+        }
+      ),
+      user_arg(user_data), total_memory(nullptr),
+      compare_mode(mode) {}
+
+  /* Different constructor with default word processing */
+  AuxRecordReader(void* user_data, ulint* memory_counter,
+                  AuxCompareMode mode= AuxCompareMode::GREATER_EQUAL)
+    : RecordCallback(
+        [this](const rec_t* rec, const dict_index_t* index,
+               const rec_offs* offsets) -> bool
+        {
+          return this->default_word_processor(rec, index, offsets,
+                                              this->user_arg);
+        },
+        [this](const dtuple_t* search_tuple, const rec_t* rec,
+               const dict_index_t* index, const rec_offs* offsets)
+        -> RecordCompareAction
+	{
+          return this->compare_record(search_tuple, rec, index, offsets);
+        }
+      ),
+      user_arg(user_data), total_memory(memory_counter),
+      compare_mode(mode) {}
+};
+
 #endif /* INNOBASE_FTS0QUERY_H */

@@ -310,6 +310,130 @@ fts_ast_visit_sub_exp(
 	fts_ast_callback	visitor,
 	void*			arg);
 
+/** Process query records for FTS queries.
+@param rec	record
+@param index	index
+@param offsets  record offsets
+@param user_arg	user argument
+@return true to continue processing, false to stop */
+static bool node_query_processor(
+   const rec_t* rec, const dict_index_t* index,
+   const rec_offs* offsets, void* user_arg)
+{
+  fts_query_t* query= static_cast<fts_query_t*>(user_arg);
+  fts_string_t key;
+  ulint word_len;
+  const byte* word_data = rec_get_nth_field(rec, offsets, 0, &word_len);
+  if (!word_data || word_len == UNIV_SQL_NULL ||
+      word_len > FTS_MAX_WORD_LEN)
+    return true;
+  key.f_str= const_cast<byte*>(word_data);
+  key.f_len= word_len;
+  ut_a(query->cur_node->type == FTS_AST_TERM
+       || query->cur_node->type == FTS_AST_TEXT
+           || query->cur_node->type == FTS_AST_PARSER_PHRASE_LIST);
+
+  fts_node_t node;
+  memset(&node, 0, sizeof(node));
+
+  fts_string_t term;
+  byte buf[FTS_MAX_WORD_LEN + 1];
+  term.f_str= buf;
+
+  /* Need to consider the wildcard search case, the word frequency
+  is created on the search string not the actual word. So we need
+  to assign the frequency on search string behalf. */
+  if (query->cur_node->type == FTS_AST_TERM && query->cur_node->term.wildcard)
+  {
+    term.f_len = query->cur_node->term.ptr->len;
+          ut_ad(FTS_MAX_WORD_LEN >= term.f_len);
+          memcpy(term.f_str, query->cur_node->term.ptr->str, term.f_len);
+  }
+  else
+  {
+    term.f_len = word_len;
+    ut_ad(FTS_MAX_WORD_LEN >= word_len);
+    memcpy(term.f_str, word_data, word_len);
+  }
+
+  /* Lookup the word in our rb tree, it must exist. */
+  ib_rbt_bound_t parent;
+  int ret= rbt_search(query->word_freqs, &parent, &term);
+
+  ut_a(ret == 0);
+  fts_word_freq_t* word_freq= rbt_value(fts_word_freq_t, parent.last);
+  bool skip = false;
+
+  ulint doc_id_len;
+  const byte* doc_id_data= rec_get_nth_field(rec, offsets, 1, &doc_id_len);
+
+  if (doc_id_data && doc_id_len == 8)
+  {
+    node.first_doc_id = fts_read_doc_id(doc_id_data);
+    skip= (query->oper == FTS_EXIST && query->upper_doc_id > 0 &&
+           node.first_doc_id > query->upper_doc_id);
+  }
+
+  doc_id_data= rec_get_nth_field(rec, offsets, 4, &doc_id_len);
+  if (doc_id_data && doc_id_len == 8)
+  {
+    node.last_doc_id = fts_read_doc_id(doc_id_data);
+    skip= (query->oper == FTS_EXIST && query->lower_doc_id > 0 &&
+           node.last_doc_id < query->lower_doc_id);
+  }
+
+  ulint doc_count_len;
+  const byte* doc_count_data= rec_get_nth_field(rec, offsets, 5, &doc_count_len);
+  if (doc_count_data && doc_count_len == 4)
+    word_freq->doc_count += mach_read_from_4(doc_count_data);
+
+  if (!skip)
+  {
+    ulint ilist_len;
+    const byte* ilist_data= rec_get_nth_field(rec, offsets, 6, &ilist_len);
+    byte* external_data = nullptr;
+    mem_heap_t* temp_heap = nullptr;
+
+    if (ilist_data && ilist_len != UNIV_SQL_NULL && ilist_len > 0)
+    {
+      /* Check if ilist is stored externally */
+      if (rec_offs_nth_extern(offsets, 6))
+      {
+        /* Create temporary heap for external data */
+        temp_heap = mem_heap_create(ilist_len + 1000);
+        /* Fetch the externally stored BLOB data */
+        ulint external_len;
+        external_data = btr_copy_externally_stored_field(
+          &external_len, ilist_data,
+          query->index->table->space->zip_size(),
+          ilist_len, temp_heap);
+
+        if (external_data)
+        {
+          ilist_data = external_data;
+          ilist_len = external_len;
+        }
+        else
+        {
+          /* Failed to fetch external data, skip this node */
+          if (temp_heap) mem_heap_free(temp_heap);
+          return true;
+        }
+      }
+
+      /* Process the ilist data (either inline or external) */
+      query->error= fts_query_filter_doc_ids(
+        query, &word_freq->word, word_freq, &node,
+        const_cast<byte*>(ilist_data), ilist_len, FALSE);
+
+      /* Clean up temporary heap if used */
+      if (temp_heap) mem_heap_free(temp_heap);
+
+      if (query->error != DB_SUCCESS) return false;
+    }
+  }
+  return true;
+}
 #if 0
 /*****************************************************************//***
 Find a doc_id in a word's ilist.
@@ -1121,10 +1245,8 @@ fts_query_difference(
 	/* There is nothing we can substract from an empty set. */
 	if (query->doc_ids && !rbt_empty(query->doc_ids)) {
 		ulint			i;
-		fts_fetch_t		fetch;
 		const ib_vector_t*	nodes;
 		const fts_index_cache_t*index_cache;
-		que_t*			graph = NULL;
 		fts_cache_t*		cache = table->fts->cache;
 		dberr_t			error;
 
@@ -1162,21 +1284,21 @@ fts_query_difference(
 			return(query->error);
 		}
 
-		/* Setup the callback args for filtering and
-		consolidating the ilist. */
-		fetch.read_arg = query;
-		fetch.read_record = fts_query_index_fetch_nodes;
+		AuxCompareMode compare_mode = AuxCompareMode::EQUAL;
+		if (query->cur_node->type == FTS_AST_TERM &&
+		    query->cur_node->term.wildcard) {
+			compare_mode = AuxCompareMode::LIKE;
+		}
 
 		error = fts_index_fetch_nodes(
-			trx, &graph, &query->fts_index_table, token, &fetch);
+			trx, query->index, token, query,
+			node_query_processor, compare_mode);
 
 		/* DB_FTS_EXCEED_RESULT_CACHE_LIMIT passed by 'query->error' */
 		ut_ad(!(query->error != DB_SUCCESS && error != DB_SUCCESS));
 		if (error != DB_SUCCESS) {
 			query->error = error;
 		}
-
-		que_graph_free(graph);
 	}
 
 	/* The size can't increase. */
@@ -1222,10 +1344,8 @@ fts_query_intersect(
 	if (!(rbt_empty(query->doc_ids) && query->multi_exist)) {
 		ulint                   n_doc_ids = 0;
 		ulint			i;
-		fts_fetch_t		fetch;
 		const ib_vector_t*	nodes;
 		const fts_index_cache_t*index_cache;
-		que_t*			graph = NULL;
 		fts_cache_t*		cache = table->fts->cache;
 		dberr_t			error;
 
@@ -1296,21 +1416,21 @@ fts_query_intersect(
 			return(query->error);
 		}
 
-		/* Setup the callback args for filtering and
-		consolidating the ilist. */
-		fetch.read_arg = query;
-		fetch.read_record = fts_query_index_fetch_nodes;
+		AuxCompareMode compare_mode = AuxCompareMode::EQUAL;
+		if (query->cur_node->type == FTS_AST_TERM &&
+		    query->cur_node->term.wildcard) {
+			compare_mode = AuxCompareMode::LIKE;
+		}
 
 		error = fts_index_fetch_nodes(
-			trx, &graph, &query->fts_index_table, token, &fetch);
+			trx, query->index, token, query,
+			node_query_processor, compare_mode);
 
 		/* DB_FTS_EXCEED_RESULT_CACHE_LIMIT passed by 'query->error' */
 		ut_ad(!(query->error != DB_SUCCESS && error != DB_SUCCESS));
 		if (error != DB_SUCCESS) {
 			query->error = error;
 		}
-
-		que_graph_free(graph);
 
 		if (query->error == DB_SUCCESS) {
 			/* Make the intesection (rb tree) the current doc id
@@ -1389,10 +1509,8 @@ fts_query_union(
 	fts_query_t*		query,	/*!< in: query instance */
 	fts_string_t*		token)	/*!< in: token to search */
 {
-	fts_fetch_t		fetch;
 	ulint			n_doc_ids = 0;
 	trx_t*			trx = query->trx;
-	que_t*			graph = NULL;
 	dberr_t			error;
 
 	ut_a(query->oper == FTS_NONE || query->oper == FTS_DECR_RATING ||
@@ -1417,22 +1535,22 @@ fts_query_union(
 
 	fts_query_cache(query, token);
 
-	/* Setup the callback args for filtering and
-	consolidating the ilist. */
-	fetch.read_arg = query;
-	fetch.read_record = fts_query_index_fetch_nodes;
+	AuxCompareMode compare_mode = AuxCompareMode::EQUAL;
+        if (query->cur_node->type == FTS_AST_TERM &&
+            query->cur_node->term.wildcard) {
+                compare_mode = AuxCompareMode::LIKE;
+        }
 
 	/* Read the nodes from disk. */
 	error = fts_index_fetch_nodes(
-		trx, &graph, &query->fts_index_table, token, &fetch);
+		trx, query->index, token, query, node_query_processor,
+		compare_mode);
 
 	/* DB_FTS_EXCEED_RESULT_CACHE_LIMIT passed by 'query->error' */
 	ut_ad(!(query->error != DB_SUCCESS && error != DB_SUCCESS));
 	if (error != DB_SUCCESS) {
 		query->error = error;
 	}
-
-	que_graph_free(graph);
 
 	if (query->error == DB_SUCCESS) {
 
@@ -2751,7 +2869,6 @@ fts_query_phrase_search(
 		fts_fetch_t	fetch;
 		trx_t*		trx = query->trx;
 		fts_ast_oper_t	oper = query->oper;
-		que_t*		graph = NULL;
 		ulint		i;
 		dberr_t		error;
 
@@ -2801,18 +2918,21 @@ fts_query_phrase_search(
 				query->matched = query->match_array[i];
 			}
 
+			AuxCompareMode compare_mode = AuxCompareMode::EQUAL;
+			if (query->cur_node->type == FTS_AST_TERM &&
+			    query->cur_node->term.wildcard) {
+				compare_mode = AuxCompareMode::LIKE;
+			}
+
 			error = fts_index_fetch_nodes(
-				trx, &graph, &query->fts_index_table,
-				token, &fetch);
+				trx, query->index, token, query,
+				node_query_processor, compare_mode);
 
 			/* DB_FTS_EXCEED_RESULT_CACHE_LIMIT passed by 'query->error' */
 			ut_ad(!(query->error != DB_SUCCESS && error != DB_SUCCESS));
 			if (error != DB_SUCCESS) {
 				query->error = error;
 			}
-
-			que_graph_free(graph);
-			graph = NULL;
 
 			fts_query_cache(query, token);
 
@@ -2954,12 +3074,11 @@ fts_query_get_token(
 
 	if (node->term.wildcard) {
 
-		token->f_str = static_cast<byte*>(ut_malloc_nokey(str_len + 2));
-		token->f_len = str_len + 1;
+		token->f_str = static_cast<byte*>(ut_malloc_nokey(str_len + 1));
+		token->f_len = str_len;
 
 		memcpy(token->f_str, node->term.ptr->str, str_len);
 
-		token->f_str[str_len] = '%';
 		token->f_str[token->f_len] = 0;
 
 		new_ptr = token->f_str;

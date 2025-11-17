@@ -32,6 +32,7 @@ Created 2011/09/02 Sunny Bains
 #include "que0que.h"
 #include "que0types.h"
 #include "fts0types.h"
+#include "fts0exec.h"
 
 /* The various states of the FTS sub system pertaining to a table with
 FTS indexes defined on it. */
@@ -198,18 +199,15 @@ fts_query_expansion_fetch_doc(
 	void*		row,		/*!< in: sel_node_t* */
 	void*		user_arg)	/*!< in: fts_doc_t* */
 	MY_ATTRIBUTE((nonnull));
-/********************************************************************
-Write out a single word's data as new entry/entries in the INDEX table.
-@return DB_SUCCESS if all OK. */
-dberr_t
-fts_write_node(
-/*===========*/
-	trx_t*		trx,		/*!< in: transaction */
-	que_t**		graph,		/*!< in: query graph */
-	fts_table_t*	fts_table,	/*!< in: the FTS aux index */
-	fts_string_t*	word,		/*!< in: word in UTF-8 */
-	fts_node_t*	node)		/*!< in: node columns */
-	MY_ATTRIBUTE((nonnull, warn_unused_result));
+
+/** Write out a single word's data as new entry/entries in the INDEX table.
+@param executor FTS Query Executor
+@param selected auxiliary index number
+@param aux_data auxiliary table data
+@return DB_SUCCESS if all OK or error code */
+dberr_t fts_write_node(FTSQueryExecutor *executor, uint8_t selected,
+                       const fts_aux_data_t *aux_data)
+                       MY_ATTRIBUTE((nonnull, warn_unused_result));
 
 /** Check if a fts token is a stopword or less than fts_min_token_size
 or greater than fts_max_token_size.
@@ -258,19 +256,22 @@ fts_word_free(
 /*==========*/
 	fts_word_t*	word)		/*!< in: instance to free.*/
 	MY_ATTRIBUTE((nonnull));
-/******************************************************************//**
-Read the rows from the FTS inde
-@return DB_SUCCESS or error code */
-dberr_t
-fts_index_fetch_nodes(
-/*==================*/
-	trx_t*		trx,		/*!< in: transaction */
-	que_t**		graph,		/*!< in: prepared statement */
-	fts_table_t*	fts_table,	/*!< in: FTS aux table */
-	const fts_string_t*
-			word,		/*!< in: the word to fetch */
-	fts_fetch_t*	fetch)		/*!< in: fetch callback.*/
-	MY_ATTRIBUTE((nonnull));
+
+/** Read the rows from FTS index
+@param trx          transaction
+@param index        fulltext index
+@param word         word to fetch
+@param user_arg     user argument
+@param processor    custom processor to filter the word from record
+@param compare_mode comparison mode for record matching
+@return error code or DB_SUCCESS */
+dberr_t fts_index_fetch_nodes(trx_t *trx, dict_index_t *index,
+                              const fts_string_t *word,
+                              void *user_arg,
+			      FTSRecordProcessor processor,
+                              AuxCompareMode compare_mode)
+                              MY_ATTRIBUTE((nonnull));
+
 #define fts_sql_commit(trx) trx_commit_for_mysql(trx)
 #define fts_sql_rollback(trx) (trx)->rollback()
 

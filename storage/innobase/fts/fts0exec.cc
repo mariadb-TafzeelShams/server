@@ -612,3 +612,191 @@ ConfigReader::ConfigReader() : RecordCallback(
     return (cmp_result == 0) ? RecordCompareAction::PROCESS
                              : RecordCompareAction::STOP;
   }) {}
+
+/** Initial size of nodes in fts_word_t. */
+static const ulint FTS_WORD_NODES_INIT_SIZE = 64;
+
+/** Initialize fts_word_t structure */
+static void init_fts_word(fts_word_t* word, const byte* utf8, ulint len)
+{
+  mem_heap_t* heap = mem_heap_create(sizeof(fts_node_t));
+  memset(word, 0, sizeof(*word));
+  word->text.f_len = len;
+  word->text.f_str = static_cast<byte*>(mem_heap_alloc(heap, len + 1));
+  memcpy(word->text.f_str, utf8, len);
+  word->text.f_str[len] = 0;
+  word->heap_alloc = ib_heap_allocator_create(heap);
+  word->nodes = ib_vector_create(word->heap_alloc, sizeof(fts_node_t),
+                                 FTS_WORD_NODES_INIT_SIZE);
+}
+
+/** AuxRecordReader default word processor implementation */
+bool AuxRecordReader::default_word_processor(
+  const rec_t* rec, const dict_index_t* index,
+  const rec_offs* offsets, void* user_arg)
+{
+  ib_vector_t *words= static_cast<ib_vector_t*>(user_arg);
+  ulint word_len;
+  const byte *word_data= rec_get_nth_field(rec, offsets, 0, &word_len);
+  fts_word_t *word;
+  bool is_word_init = false;
+  if (!word_data || word_len == UNIV_SQL_NULL || word_len > FTS_MAX_WORD_LEN)
+    return true;
+
+  ut_ad(word_len <= FTS_MAX_WORD_LEN);
+
+  if (ib_vector_size(words) == 0)
+  {
+    /* First word - push and initialize */
+    word = static_cast<fts_word_t*>(ib_vector_push(words, nullptr));
+    init_fts_word(word, word_data, word_len);
+    is_word_init = true;
+  }
+  else
+  {
+    /* Check if this word is different from the last word */
+    word = static_cast<fts_word_t*>(ib_vector_last(words));
+    if (word_len != word->text.f_len ||
+        memcmp(word->text.f_str, word_data, word_len))
+    {
+      /* Different word - push new word and initialize */
+      word = static_cast<fts_word_t*>(ib_vector_push(words, nullptr));
+      init_fts_word(word, word_data, word_len);
+      is_word_init = true;
+    }
+  }
+  fts_node_t *node= static_cast<fts_node_t*>(
+    ib_vector_push(word->nodes, nullptr));
+
+  ulint doc_id_len;
+  const byte *doc_id_data= rec_get_nth_field(rec, offsets, 1, &doc_id_len);
+  if (doc_id_data && doc_id_len == 8)
+    node->first_doc_id= fts_read_doc_id(doc_id_data);
+  else node->first_doc_id= 0;
+
+  /* Read last_doc_id (field 4) */
+  doc_id_data= rec_get_nth_field(rec, offsets, 4, &doc_id_len);
+  if (doc_id_data && doc_id_len == 8)
+    node->last_doc_id= fts_read_doc_id(doc_id_data);
+  else node->last_doc_id= 0;
+
+  /* Read doc_count (field 5) */
+  ulint doc_count_len;
+  const byte *doc_count_data= rec_get_nth_field(rec, offsets, 5,
+                                                &doc_count_len);
+  if (doc_count_data && doc_count_len == 4)
+    node->doc_count= mach_read_from_4(doc_count_data);
+  else node->doc_count= 0;
+
+  /* Read ilist (field 6) with external BLOB support */
+  ulint ilist_len= 0;
+  const byte *ilist_data= rec_get_nth_field(rec, offsets, 6, &ilist_len);
+  byte *external_data= nullptr;
+  mem_heap_t *temp_heap= nullptr;
+
+  node->ilist_size_alloc= node->ilist_size= 0;
+  node->ilist= nullptr;
+
+  if (ilist_data && ilist_len != UNIV_SQL_NULL && ilist_len > 0)
+  {
+    if (rec_offs_nth_extern(offsets, 6))
+    {
+      temp_heap= mem_heap_create(ilist_len);
+      ulint external_len;
+      external_data= btr_copy_externally_stored_field(
+        &external_len, ilist_data, index->table->space->zip_size(),
+        ilist_len, temp_heap);
+      if (external_data)
+      {
+        ilist_data= external_data;
+	ilist_len= external_len;
+      }
+    }
+    node->ilist_size_alloc= node->ilist_size= ilist_len;
+    if (ilist_len)
+    {
+      node->ilist= static_cast<byte*>(ut_malloc_nokey(ilist_len));
+      memcpy(node->ilist, ilist_data, ilist_len);
+    }
+    if (temp_heap) mem_heap_free(temp_heap);
+    if (ilist_len == 0) return false;
+  }
+
+  if (this->total_memory)
+  {
+    if (is_word_init)
+    {
+      *this->total_memory+=
+         sizeof(fts_word_t) + sizeof(ib_alloc_t) +
+         sizeof(ib_vector_t) + word_len +
+         sizeof(fts_node_t) * FTS_WORD_NODES_INIT_SIZE;
+    }
+    *this->total_memory += node->ilist_size;
+    if (*this->total_memory >= fts_result_cache_limit)
+      return false;
+  }
+  return true;
+}
+
+/** AuxRecordReader comparison logic implementation */
+RecordCompareAction AuxRecordReader::compare_record(
+  const dtuple_t* search_tuple, const rec_t* rec,
+  const dict_index_t* index, const rec_offs* offsets) noexcept
+{
+  if (!search_tuple) return RecordCompareAction::PROCESS;
+  const dfield_t* search_field= dtuple_get_nth_field(search_tuple, 0);
+  const void* search_data= dfield_get_data(search_field);
+  ulint search_len= dfield_get_len(search_field);
+
+  ulint rec_len;
+  const byte* rec_data= rec_get_nth_field(rec, offsets, 0, &rec_len);
+
+  if (!rec_data || rec_len == UNIV_SQL_NULL)
+    return RecordCompareAction::SKIP;
+  if (!search_data || search_len == UNIV_SQL_NULL)
+    return RecordCompareAction::PROCESS;
+  int cmp_result;
+  switch (compare_mode)
+  {
+    case AuxCompareMode::GREATER_EQUAL:
+    case AuxCompareMode::GREATER:
+    {
+      uint16_t matched_fields= 0;
+      cmp_result= cmp_dtuple_rec_with_match(search_tuple, rec, index,
+                                            offsets, &matched_fields);
+      if (compare_mode == AuxCompareMode::GREATER_EQUAL)
+        return (cmp_result <= 0) ? RecordCompareAction::PROCESS
+                                 : RecordCompareAction::SKIP;
+      else
+        return (cmp_result < 0) ? RecordCompareAction::PROCESS
+                                : RecordCompareAction::SKIP;
+    }
+    case AuxCompareMode::LIKE:
+    case AuxCompareMode::EQUAL:
+    {
+      /* Use charset-aware comparison for LIKE and EQUAL modes */
+      const dtype_t* type= dfield_get_type(search_field);
+      cmp_result= cmp_data(type->mtype, type->prtype, false,
+                           static_cast<const byte*>(search_data),
+                           search_len, rec_data, rec_len);
+
+      if (compare_mode == AuxCompareMode::EQUAL)
+        return cmp_result == 0
+               ? RecordCompareAction::PROCESS
+               : RecordCompareAction::STOP;
+      else /* AuxCompareMode::LIKE */
+      {
+        /* For LIKE mode, compare only the prefix (search_len bytes) */
+        int prefix_cmp = cmp_data(type->mtype, type->prtype, false,
+                                  static_cast<const byte*>(search_data),
+                                  search_len, rec_data,
+                                  search_len <= rec_len ? search_len : rec_len);
+
+        if (prefix_cmp != 0) return RecordCompareAction::STOP;
+        return (search_len <= rec_len) ? RecordCompareAction::PROCESS
+                                       : RecordCompareAction::SKIP;
+      }
+    }
+  }
+  return RecordCompareAction::PROCESS;
+}

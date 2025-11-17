@@ -138,11 +138,6 @@ struct fts_optimize_t {
 
 	char*		name_prefix;	/*!< FTS table name prefix */
 
-	fts_table_t	fts_index_table;/*!< Common table definition */
-
-					/*!< Common table definition */
-	fts_table_t	fts_common_table;
-
 	dict_table_t*	table;		/*!< Table that has to be queried */
 
 	dict_index_t*	index;		/*!< The FTS index to be optimized */
@@ -1230,18 +1225,10 @@ fts_optimize_create(
 	optim->trx = trx_create();
 	trx_start_internal(optim->trx);
 
-	optim->fts_common_table.table_id = table->id;
-	optim->fts_common_table.type = FTS_COMMON_TABLE;
-	optim->fts_common_table.table = table;
-
-	optim->fts_index_table.table_id = table->id;
-	optim->fts_index_table.type = FTS_INDEX_TABLE;
-	optim->fts_index_table.table = table;
-
 	/* The common prefix for all this parent table's aux tables. */
 	char table_id[FTS_AUX_MIN_TABLE_ID_LENGTH];
 	const size_t table_id_len = 1
-		+ size_t(fts_get_table_id(&optim->fts_common_table, table_id));
+		+ size_t(fts_write_object_id(table->id, table_id));
 	dict_sys.freeze(SRW_LOCK_CALL);
 	/* Include the separator as well. */
 	const size_t dbname_len = table->name.dblen() + 1;
@@ -1546,10 +1533,6 @@ fts_optimize_index(
 	dberr_t		error;
 	byte		str[FTS_MAX_WORD_LEN + 1];
 
-	/* Set the current index that we have to optimize. */
-	optim->fts_index_table.index_id = index->id;
-	optim->fts_index_table.charset = fts_index_get_charset(index);
-
 	optim->done = FALSE; /* Optimize until !done */
 
 	/* We need to read the last word optimized so that we start from
@@ -1713,7 +1696,6 @@ fts_optimize_read_deleted_doc_id_snapshot(
 
 	if (error == DB_SUCCESS) {
 
-		optim->fts_common_table.suffix = "BEING_DELETED_CACHE";
 		/* Read additional doc_ids to delete. */
 		error = fts_table_fetch_doc_ids(
 			optim->trx, optim->table, "BEING_DELETED_CACHE",

@@ -113,65 +113,12 @@ component.
 /** Maximum length of an integer stored in the config table value column. */
 #define FTS_MAX_INT_LEN			32
 
-/******************************************************************//**
-Parse an SQL string. %s is replaced with the table's id.
-@return query graph */
-que_t*
-fts_parse_sql(
-/*==========*/
-	fts_table_t*	fts_table,	/*!< in: FTS aux table */
-	pars_info_t*	info,		/*!< in: info struct, or NULL */
-	const char*	sql)		/*!< in: SQL string to evaluate */
-	MY_ATTRIBUTE((nonnull(3), malloc, warn_unused_result));
-/******************************************************************//**
-Evaluate a parsed SQL statement
-@return DB_SUCCESS or error code */
-dberr_t
-fts_eval_sql(
-/*=========*/
-	trx_t*		trx,		/*!< in: transaction */
-	que_t*		graph)		/*!< in: Parsed statement */
-	MY_ATTRIBUTE((nonnull, warn_unused_result));
-
 /** Construct the name of an internal FTS table for the given table.
 @param[in]	fts_table	metadata on fulltext-indexed table
 @param[out]	table_name	a name up to MAX_FULL_NAME_LEN
 @param[in]	dict_locked	whether dict_sys.latch is being held */
 void fts_get_table_name(const fts_table_t* fts_table, char* table_name,
 			bool dict_locked = false)
-	MY_ATTRIBUTE((nonnull));
-/******************************************************************//**
-Construct the column specification part of the SQL string for selecting the
-indexed FTS columns for the given table. Adds the necessary bound
-ids to the given 'info' and returns the SQL string. Examples:
-
-One indexed column named "text":
-
- "$sel0",
- info/ids: sel0 -> "text"
-
-Two indexed columns named "subject" and "content":
-
- "$sel0, $sel1",
- info/ids: sel0 -> "subject", sel1 -> "content",
-@return heap-allocated WHERE string */
-const char*
-fts_get_select_columns_str(
-/*=======================*/
-	dict_index_t*	index,		/*!< in: FTS index */
-	pars_info_t*	info,		/*!< in/out: parser info */
-	mem_heap_t*	heap)		/*!< in: memory heap */
-	MY_ATTRIBUTE((nonnull, warn_unused_result));
-
-/*******************************************************************//**
-Callback function for fetch that stores the text of an FTS document,
-converting each column to UTF-16.
-@return always FALSE */
-ibool
-fts_query_expansion_fetch_doc(
-/*==========================*/
-	void*		row,		/*!< in: sel_node_t* */
-	void*		user_arg)	/*!< in: fts_doc_t* */
 	MY_ATTRIBUTE((nonnull));
 
 /** Write out a single word's data as new entry/entries in the INDEX table.

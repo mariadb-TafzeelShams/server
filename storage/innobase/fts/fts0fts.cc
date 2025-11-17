@@ -557,6 +557,46 @@ fts_cache_init(
 	}
 }
 
+/** Construct the name of an internal FTS table for the given table.
+@param[in]      fts_table       metadata on fulltext-indexed table
+@param[out]     table_name      a name up to MAX_FULL_NAME_LEN
+@param[in]      dict_locked     whether dict_sys.latch is being held */
+void fts_get_table_name(const fts_table_t* fts_table, char* table_name,
+                        bool dict_locked)
+{
+  if (!dict_locked) dict_sys.freeze(SRW_LOCK_CALL);
+  ut_ad(dict_sys.frozen());
+  /* Include the separator as well. */
+  const size_t dbname_len= fts_table->table->name.dblen() + 1;
+  ut_ad(dbname_len > 1);
+  memcpy(table_name, fts_table->table->name.m_name, dbname_len);
+  if (!dict_locked) dict_sys.unfreeze();
+
+  memcpy(table_name += dbname_len, "FTS_", 4);
+  table_name += 4;
+  int len;
+  switch (fts_table->type)
+  {
+    case FTS_COMMON_TABLE:
+      len= fts_write_object_id(fts_table->table_id, table_name);
+      break;
+
+    case FTS_INDEX_TABLE:
+      len= fts_write_object_id(fts_table->table_id, table_name);
+      table_name[len]= '_';
+      ++len;
+      len+= fts_write_object_id(fts_table->index_id, table_name + len);
+      break;
+
+    default: ut_error;
+  }
+  ut_a(len >= 16);
+  ut_a(len < FTS_AUX_MIN_TABLE_ID_LENGTH);
+  table_name+= len;
+  *table_name++= '_';
+  strcpy(table_name, fts_table->suffix);
+}
+
 /****************************************************************//**
 Create a FTS cache. */
 fts_cache_t*
@@ -2690,7 +2730,6 @@ fts_delete(
 	fts_trx_table_t*ftt,			/*!< in: FTS trx table */
 	fts_trx_row_t*	row)			/*!< in: row */
 {
-	fts_table_t	fts_table;
 	dict_table_t*	table = ftt->table;
 	doc_id_t	doc_id = row->doc_id;
 	trx_t*		trx = ftt->fts_trx->trx;
@@ -2703,8 +2742,6 @@ fts_delete(
 	}
 
 	ut_a(row->state == FTS_DELETE || row->state == FTS_MODIFY);
-
-	FTS_INIT_FTS_TABLE(&fts_table, "DELETED", FTS_COMMON_TABLE, table);
 
 	/* It is possible we update a record that has not yet been sync-ed
 	into cache from last crash (delete Doc will not initialize the
@@ -2897,93 +2934,6 @@ fts_doc_free(
 	ut_d(memset(doc, 0, sizeof(*doc)));
 
 	mem_heap_free(heap);
-}
-
-/*********************************************************************//**
-Callback function for fetch that stores the text of an FTS document,
-converting each column to UTF-16.
-@return always FALSE */
-ibool
-fts_query_expansion_fetch_doc(
-/*==========================*/
-	void*		row,			/*!< in: sel_node_t* */
-	void*		user_arg)		/*!< in: fts_doc_t* */
-{
-	que_node_t*	exp;
-	sel_node_t*	node = static_cast<sel_node_t*>(row);
-	fts_doc_t*	result_doc = static_cast<fts_doc_t*>(user_arg);
-	dfield_t*	dfield;
-	ulint		len;
-	ulint		doc_len;
-	fts_doc_t	doc;
-	CHARSET_INFO*	doc_charset = NULL;
-	ulint		field_no = 0;
-
-	len = 0;
-
-	fts_doc_init(&doc);
-	doc.found = TRUE;
-
-	exp = node->select_list;
-	doc_len = 0;
-
-	doc_charset  = result_doc->charset;
-
-	/* Copy each indexed column content into doc->text.f_str */
-	while (exp) {
-		dfield = que_node_get_val(exp);
-		len = dfield_get_len(dfield);
-
-		/* NULL column */
-		if (len == UNIV_SQL_NULL) {
-			exp = que_node_get_next(exp);
-			continue;
-		}
-
-		if (!doc_charset) {
-			doc_charset = fts_get_charset(dfield->type.prtype);
-		}
-
-		doc.charset = doc_charset;
-
-		if (dfield_is_ext(dfield)) {
-			/* We ignore columns that are stored externally, this
-			could result in too many words to search */
-			exp = que_node_get_next(exp);
-			continue;
-		} else {
-			doc.text.f_n_char = 0;
-
-			doc.text.f_str = static_cast<byte*>(
-				dfield_get_data(dfield));
-
-			doc.text.f_len = len;
-		}
-
-		if (field_no == 0) {
-			fts_tokenize_document(&doc, result_doc,
-					      result_doc->parser);
-		} else {
-			fts_tokenize_document_next(&doc, doc_len, result_doc,
-						   result_doc->parser);
-		}
-
-		exp = que_node_get_next(exp);
-
-		doc_len += (exp) ? len + 1 : len;
-
-		field_no++;
-	}
-
-	ut_ad(doc_charset);
-
-	if (!result_doc->charset) {
-		result_doc->charset = doc_charset;
-	}
-
-	fts_doc_free(&doc);
-
-	return(FALSE);
 }
 
 /*********************************************************************//**
@@ -4455,12 +4405,11 @@ fts_update_max_cache_size(
 	fts_sync_t*	sync)			/*!< in: sync state */
 {
 	trx_t*		trx;
-	fts_table_t	fts_table;
 
 	trx = trx_create();
 
 	/* The size returned is in bytes. */
-	sync->max_cache_size = fts_get_max_cache_size(trx, &fts_table);
+	sync->max_cache_size = fts_get_max_cache_size(trx, sync->table);
 
 	fts_sql_commit(trx);
 

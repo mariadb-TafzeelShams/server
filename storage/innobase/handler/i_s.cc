@@ -2204,7 +2204,6 @@ i_s_fts_deleted_generic_fill(
 	Field**			fields;
 	TABLE*			table = (TABLE*) tables->table;
 	trx_t*			trx;
-	fts_table_t		fts_table;
 	fts_doc_ids_t*		deleted;
 	dict_table_t*		user_table;
 
@@ -2234,10 +2233,6 @@ i_s_fts_deleted_generic_fill(
 
 	trx = trx_create();
 	trx->op_info = "Select for FTS DELETE TABLE";
-
-	FTS_INIT_FTS_TABLE(&fts_table,
-			   (being_deleted) ? "BEING_DELETED" : "DELETED",
-			   FTS_COMMON_TABLE, user_table);
 
 	fts_table_fetch_doc_ids(
 		nullptr, user_table,

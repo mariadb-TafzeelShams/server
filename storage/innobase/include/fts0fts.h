@@ -784,14 +784,6 @@ fts_tokenize_document_internal(
 	const char*			doc,	/*!< in: document to tokenize */
 	int			len);	/*!< in: document length */
 
-/*********************************************************************//**
-Fetch COUNT(*) from specified table.
-@return the number of rows in the table */
-ulint
-fts_get_rows_count(
-/*===============*/
-	fts_table_t*	fts_table);		/*!< in: fts table to read */
-
 /*************************************************************//**
 Get maximum Doc ID in a table if index "FTS_DOC_ID_INDEX" exists
 @return max Doc ID or 0 if index "FTS_DOC_ID_INDEX" does not exist */
@@ -936,3 +928,28 @@ fts_update_sync_doc_id(const dict_table_t *table,
 /** Sync the table during commit phase
 @param[in]	table	table to be synced */
 void fts_sync_during_ddl(dict_table_t* table);
+
+/** Tokenize a document.
+@param[in,out]  doc     document to tokenize
+@param[out]     result  tokenization result
+@param[in]      parser  pluggable parser */
+void fts_tokenize_document(
+        fts_doc_t*              doc,
+        fts_doc_t*              result,
+        st_mysql_ftparser*      parser);
+
+/** Continue to tokenize a document.
+@param[in,out]  doc     document to tokenize
+@param[in]      add_pos add this position to all tokens from this tokenization
+@param[out]     result  tokenization result
+@param[in]      parser  pluggable parser */
+void fts_tokenize_document_next(
+        fts_doc_t*              doc,
+        ulint                   add_pos,
+        fts_doc_t*              result,
+        st_mysql_ftparser*      parser);
+
+/** Get a character set based on precise type.
+@param prtype precise type
+@return the corresponding character set */
+CHARSET_INFO* fts_get_charset(ulint prtype);

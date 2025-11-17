@@ -163,32 +163,6 @@ fts_get_select_columns_str(
 	mem_heap_t*	heap)		/*!< in: memory heap */
 	MY_ATTRIBUTE((nonnull, warn_unused_result));
 
-/** define for fts_doc_fetch_by_doc_id() "option" value, defines whether
-we want to get Doc whose ID is equal to or greater or smaller than supplied
-ID */
-#define	FTS_FETCH_DOC_BY_ID_EQUAL	1
-#define	FTS_FETCH_DOC_BY_ID_LARGE	2
-#define	FTS_FETCH_DOC_BY_ID_SMALL	3
-
-/*************************************************************//**
-Fetch document (= a single row's indexed text) with the given
-document id.
-@return: DB_SUCCESS if fetch is successful, else error */
-dberr_t
-fts_doc_fetch_by_doc_id(
-/*====================*/
-	fts_get_doc_t*	get_doc,	/*!< in: state */
-	doc_id_t	doc_id,		/*!< in: id of document to fetch */
-	dict_index_t*	index_to_use,	/*!< in: caller supplied FTS index,
-					or NULL */
-	ulint		option,         /*!< in: search option, if it is
-                                        greater than doc_id or equal */
-	fts_sql_callback
-			callback,	/*!< in: callback to read
-					records */
-	void*		arg)		/*!< in: callback arg */
-	MY_ATTRIBUTE((nonnull(6)));
-
 /*******************************************************************//**
 Callback function for fetch that stores the text of an FTS document,
 converting each column to UTF-16.

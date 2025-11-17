@@ -434,6 +434,27 @@ static bool node_query_processor(
   }
   return true;
 }
+
+/* Comparator that signals how to treat the current record */
+RecordCompareAction doc_id_exact_match_comparator(
+  const dtuple_t* search_tuple, const rec_t* rec, const dict_index_t* index,
+  const rec_offs* offsets)
+{
+  const dfield_t* search_field= dtuple_get_nth_field(search_tuple, 0);
+  const byte* search_data=
+    static_cast<const byte*>(dfield_get_data(search_field));
+  doc_id_t target_doc_id= fts_read_doc_id(search_data);
+
+  ulint len;
+  const byte* rec_data= rec_get_nth_field(rec, offsets, 0, &len);
+  if (len != sizeof(doc_id_t))
+    return RecordCompareAction::STOP;
+  doc_id_t rec_doc_id= fts_read_doc_id(rec_data);
+  return rec_doc_id == target_doc_id
+         ? RecordCompareAction::PROCESS
+         : RecordCompareAction::STOP;
+}
+
 #if 0
 /*****************************************************************//***
 Find a doc_id in a word's ilist.
@@ -2068,116 +2089,231 @@ fts_query_match_phrase(
 	return(phrase->found);
 }
 
-/*****************************************************************//**
-Callback function to fetch and search the document.
+/** Callback function to fetch and search the document.
+@param fts_index fulltext index
+@param doc_id    document id
+@param arg       user argument
+@param expansion Expansion document
 @return whether the phrase is found */
 static
-ibool
-fts_query_fetch_document(
-/*=====================*/
-	void*		row,		/*!< in:  sel_node_t* */
-	void*		user_arg)	/*!< in:  fts_doc_t* */
+dberr_t fts_query_fetch_document(dict_index_t *fts_index,
+                                 doc_id_t doc_id,
+                                 void *arg, bool expansion= false)
 {
+  trx_t *trx= trx_create();
+  trx->op_info= "fetching FTS document for query";
+  dict_table_t *user_table= fts_index->table;
+  dict_index_t *fts_doc_id_index= user_table->fts_doc_id_index;
+  dict_index_t *clust_index= dict_table_get_first_index(user_table);
+  ut_a(user_table->fts->doc_col != ULINT_UNDEFINED);
+  ut_a(fts_doc_id_index);
 
-	que_node_t*	exp;
-	sel_node_t*	node = static_cast<sel_node_t*>(row);
-	fts_phrase_t*	phrase = static_cast<fts_phrase_t*>(user_arg);
-	ulint		prev_len = 0;
-	ulint		total_len = 0;
-	byte*		document_text = NULL;
+  QueryExecutor executor(trx);
 
-	exp = node->select_list;
+  /* Map FTS index columns to clustered index field positions */
+  ulint *clust_field_nos= static_cast<ulint*>(
+    mem_heap_alloc(executor.get_heap(),
+                   fts_index->n_user_defined_cols * sizeof(ulint)));
 
-	phrase->found = FALSE;
+  for (ulint i= 0; i < fts_index->n_user_defined_cols; i++)
+  {
+    dict_field_t* fts_field= dict_index_get_nth_field(fts_index, i);
+    clust_field_nos[i]= dict_col_get_index_pos(fts_field->col, clust_index);
+  }
+  dfield_t fields[1];
+  dtuple_t search_tuple{0, 1, 1, 0, fields, nullptr
+#ifdef UNIV_DEBUG
+                        , DATA_TUPLE_MAGIC_N
+#endif
+                        };
+  dict_index_copy_types(&search_tuple, fts_doc_id_index, 1);
+  dfield_t* dfield= dtuple_get_nth_field(&search_tuple, 0);
+  doc_id_t write_doc_id;
+  fts_write_doc_id((byte*) &write_doc_id, doc_id);
+  dfield_set_data(dfield, &write_doc_id, sizeof(write_doc_id));
 
-	/* For proximity search, we will need to get the whole document
-	from all fields, so first count the total length of the document
-	from all the fields */
-	if (phrase->proximity_pos) {
-		 while (exp) {
-			ulint		field_len;
-			dfield_t*	dfield = que_node_get_val(exp);
-			byte*		data = static_cast<byte*>(
-						dfield_get_data(dfield));
+  auto process_expansion_doc= [arg, fts_index,
+                               clust_field_nos](const rec_t* rec,
+                                                const dict_index_t *index,
+                                                const rec_offs *offsets)-> bool
+  {
+    fts_doc_t *result_doc= static_cast<fts_doc_t*>(arg);
+    fts_doc_t doc;
+    CHARSET_INFO *doc_charset= result_doc->charset;
+    fts_doc_init(&doc);
+    doc.found= TRUE;
 
-			if (dfield_is_ext(dfield)) {
-				ulint	local_len = dfield_get_len(dfield);
+    ulint doc_len= 0;
+    ulint field_no= 0;
 
-				local_len -= BTR_EXTERN_FIELD_REF_SIZE;
+    /* Process each indexed column content */
+    for (ulint i= 0; i < fts_index->n_user_defined_cols; i++)
+    {
+      ulint col_pos= clust_field_nos[i];
+      ulint field_len;
+      const byte* field_data= rec_get_nth_field(rec, offsets,
+                                                col_pos, &field_len);
 
-				field_len = mach_read_from_4(
-					data + local_len + BTR_EXTERN_LEN + 4);
-			} else {
-				field_len = dfield_get_len(dfield);
-			}
+      /* NULL column */
+      if (field_len == UNIV_SQL_NULL) {
+        continue;
+      }
 
-			if (field_len != UNIV_SQL_NULL) {
-				total_len += field_len + 1;
-			}
+      /* Determine document charset from column if not provided */
+      if (!doc_charset)
+      {
+        const dict_field_t* ifield= dict_index_get_nth_field(fts_index, i);
+        doc_charset= fts_get_charset(ifield->col->prtype);
+      }
 
-			exp = que_node_get_next(exp);
-		}
+      doc.charset= doc_charset;
+      /* Skip columns stored externally, as in fts_query_expansion_fetch_doc */
+      if (rec_offs_nth_extern(offsets, col_pos)) {
+        continue;
+      }
 
-		document_text = static_cast<byte*>(mem_heap_zalloc(
-					phrase->heap, total_len));
+      /* Use inline field data */
+      doc.text.f_n_char= 0;
+      doc.text.f_str= const_cast<byte*>(field_data);
+      doc.text.f_len= field_len;
 
-		if (!document_text) {
-			return(FALSE);
-		}
-	}
+      if (field_no == 0)
+        fts_tokenize_document(&doc, result_doc, result_doc->parser);
+      else
+        fts_tokenize_document_next(&doc, doc_len, result_doc,
+                                   result_doc->parser);
 
-	exp = node->select_list;
+      /* Next field offset: add 1 for separator if more fields follow */
+      doc_len+= ((i + 1) < fts_index->n_user_defined_cols)
+        ? field_len + 1
+        : field_len;
 
-	while (exp) {
-		dfield_t*	dfield = que_node_get_val(exp);
-		byte*		data = static_cast<byte*>(
-					dfield_get_data(dfield));
-		ulint		cur_len;
+      field_no++;
+    }
 
-		if (dfield_is_ext(dfield)) {
-			data = btr_copy_externally_stored_field(
-				&cur_len, data, phrase->zip_size,
-				dfield_get_len(dfield), phrase->heap);
-		} else {
-			cur_len = dfield_get_len(dfield);
-		}
+    ut_ad(doc_charset);
+    if (!result_doc->charset) {
+      result_doc->charset= doc_charset;
+    }
 
-		if (cur_len != UNIV_SQL_NULL && cur_len != 0) {
-			if (phrase->proximity_pos) {
-				ut_ad(prev_len + cur_len <= total_len);
-				memcpy(document_text + prev_len, data, cur_len);
-			} else {
-				/* For phrase search */
-				phrase->found =
-					fts_query_match_phrase(
-						phrase,
-						static_cast<byte*>(data),
-						cur_len, prev_len,
-						phrase->heap);
-			}
+    fts_doc_free(&doc);
 
-			/* Document positions are calculated from the beginning
-			of the first field, need to save the length for each
-			searched field to adjust the doc position when search
-			phrases. */
-			prev_len += cur_len + 1;
-		}
+    return true; /* continue */
+  };
 
-		if (phrase->found) {
-			break;
-		}
+  auto process_doc_query= [arg, user_table, fts_index,
+                           clust_field_nos](const rec_t* rec,
+                                            const dict_index_t* index,
+                                            const rec_offs* offsets) -> bool
+  {
+    ulint prev_len= 0;
+    ulint total_len= 0;
+    byte *document_text= nullptr;
 
-		exp = que_node_get_next(exp);
-	}
+    fts_phrase_t *phrase= static_cast<fts_phrase_t*>(arg);
+    phrase->found= FALSE;
 
-	if (phrase->proximity_pos) {
-		ut_ad(prev_len <= total_len);
+    /* Extract doc_id from the clustered index record */
+    ulint doc_col_pos= dict_col_get_index_pos(
+      &user_table->cols[user_table->fts->doc_col], index);
 
-		phrase->found = fts_proximity_is_word_in_range(
-			phrase, document_text, total_len);
-	}
+    ulint len;
+    rec_get_nth_field(rec, offsets, doc_col_pos, &len);
+    if (len != sizeof(doc_id_t))
+      return true;
 
-	return(phrase->found);
+    /* For proximity search, first count total document length */
+    if (phrase->proximity_pos)
+    {
+      for (ulint i= 0; i < fts_index->n_user_defined_cols; i++)
+      {
+        ulint col_pos= clust_field_nos[i];
+        ulint field_len;
+        const byte* field_data= rec_get_nth_field(rec, offsets,
+                                                  col_pos, &field_len);
+        if (rec_offs_nth_extern(offsets, col_pos))
+        {
+          ulint local_len= field_len;
+          local_len-= BTR_EXTERN_FIELD_REF_SIZE;
+          field_len= mach_read_from_4(
+            field_data + local_len + BTR_EXTERN_LEN + 4);
+        }
+        if (field_len != UNIV_SQL_NULL)
+          total_len+= field_len + 1;
+      }
+
+      document_text=
+        static_cast<byte*>(mem_heap_zalloc(phrase->heap, total_len));
+      if (!document_text)
+        return false;
+    }
+
+    /* Process each indexed column content */
+    for (ulint i= 0; i < fts_index->n_user_defined_cols; i++)
+    {
+      ulint col_pos= clust_field_nos[i];
+      ulint field_len;
+      const byte* field_data= rec_get_nth_field(rec, offsets,
+                                                col_pos, &field_len);
+      byte* data= const_cast<byte*>(field_data);
+      ulint cur_len;
+
+      if (rec_offs_nth_extern(offsets, col_pos))
+      {
+        data= btr_copy_externally_stored_field(
+          &cur_len, const_cast<byte*>(field_data), phrase->zip_size,
+          field_len, phrase->heap);
+      }
+      else cur_len= field_len;
+      if (cur_len != UNIV_SQL_NULL && cur_len != 0)
+      {
+        if (phrase->proximity_pos)
+        {
+          ut_ad(prev_len + cur_len <= total_len);
+          memcpy(document_text + prev_len, data, cur_len);
+        }
+        else
+        {
+          /* For phrase search */
+          phrase->found= fts_query_match_phrase(
+            phrase, data, cur_len, prev_len, phrase->heap);
+        }
+
+        /* Document positions are calculated from the beginning
+        of the first field, need to save the length for each
+        searched field to adjust the doc position when search
+        phrases. */
+        prev_len+= cur_len + 1;
+      }
+
+      if (phrase->found)
+        break;
+    }
+
+    if (phrase->proximity_pos)
+    {
+      ut_ad(prev_len <= total_len);
+      phrase->found= fts_proximity_is_word_in_range(
+        phrase, document_text, total_len);
+    }
+
+    return !phrase->found; /* Continue only if not found */
+  };
+
+  RecordProcessor proc= expansion
+                        ? RecordProcessor(process_expansion_doc)
+                        : RecordProcessor(process_doc_query);
+  RecordCallback reader(proc, doc_id_exact_match_comparator);
+  dberr_t err= DB_SUCCESS;
+  if (fts_doc_id_index == clust_index)
+    err= executor.read(user_table, &search_tuple, PAGE_CUR_GE, reader);
+  else
+    err= executor.read_by_index(user_table, fts_doc_id_index,
+                                &search_tuple, PAGE_CUR_GE, reader);
+  trx_commit_for_mysql(trx);
+  trx->free();
+  if (err == DB_RECORD_NOT_FOUND) err= DB_SUCCESS;
+  return err;
 }
 
 #if 0
@@ -2566,9 +2702,8 @@ fts_query_match_document(
 
 	*found = phrase.found = FALSE;
 
-	error = fts_doc_fetch_by_doc_id(
-		get_doc, match->doc_id, NULL, FTS_FETCH_DOC_BY_ID_EQUAL,
-		fts_query_fetch_document, &phrase);
+	error = fts_query_fetch_document(
+		get_doc->index_cache->index, match->doc_id, &phrase);
 
 	if (UNIV_UNLIKELY(error != DB_SUCCESS)) {
 		ib::error() << "(" << error << ") matching document.";
@@ -2613,19 +2748,12 @@ fts_query_is_in_proximity_range(
 	phrase.proximity_pos = qualified_pos;
 	phrase.found = FALSE;
 
-	err = fts_doc_fetch_by_doc_id(
-		&get_doc, match[0]->doc_id, NULL, FTS_FETCH_DOC_BY_ID_EQUAL,
-		fts_query_fetch_document, &phrase);
+	err = fts_query_fetch_document(
+		get_doc.index_cache->index, match[0]->doc_id, &phrase);
 
 	if (UNIV_UNLIKELY(err != DB_SUCCESS)) {
 		ib::error() << "(" << err << ") in verification"
 			" phase of proximity search";
-	}
-
-	/* Free the prepared statement. */
-	if (get_doc.get_document_graph) {
-		que_graph_free(get_doc.get_document_graph);
-		get_doc.get_document_graph = NULL;
 	}
 
 	mem_heap_free(phrase.heap);
@@ -4414,10 +4542,8 @@ fts_expand_query(
 		fetch the original document and parse them.
 		Future optimization could be done here if we
 		support some forms of document-to-word mapping */
-		fts_doc_fetch_by_doc_id(NULL, ranking->doc_id, index,
-					FTS_FETCH_DOC_BY_ID_EQUAL,
-					fts_query_expansion_fetch_doc,
-					&result_doc);
+		fts_query_fetch_document(index, ranking->doc_id,
+                                         &result_doc, true);
 
 		/* Estimate memory used, see fts_process_token and fts_token_t.
 		   We ignore token size here. */

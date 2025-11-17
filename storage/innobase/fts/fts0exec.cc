@@ -32,7 +32,6 @@ Created 2025/11/05
 #include "row0ins.h"
 #include "row0upd.h"
 #include "row0sel.h"
-#include "pars0pars.h"
 #include "eval0eval.h"
 #include "que0que.h"
 #include "trx0trx.h"

@@ -158,6 +158,7 @@ dberr_t QueryExecutor::delete_all(dict_table_t *table) noexcept
   mtr.set_named_space(table->space);
 
   dberr_t err= pcur.open_leaf(true, index, BTR_MODIFY_LEAF, &mtr);
+  if (err == DB_SUCCESS) btr_pcur_move_to_next(&pcur, &mtr);
   if (err != DB_SUCCESS)
   {
     mtr.commit();

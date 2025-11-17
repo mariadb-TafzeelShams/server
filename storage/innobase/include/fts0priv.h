@@ -28,7 +28,6 @@ Created 2011/09/02 Sunny Bains
 #define INNOBASE_FTS0PRIV_H
 
 #include "dict0dict.h"
-#include "pars0pars.h"
 #include "que0que.h"
 #include "que0types.h"
 #include "fts0types.h"

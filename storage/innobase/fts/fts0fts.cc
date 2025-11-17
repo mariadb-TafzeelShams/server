@@ -5425,7 +5425,7 @@ static void fts_init_recover_all_docs(fts_get_doc_t *get_doc,
       doc_id= fts_read_doc_id(doc_id_data);
 
       /* Process each indexed column content */
-      for (ulint i= 0; i < fts_index->n_user_defined_cols; i++)
+      for (unsigned i= 0; i < fts_index->n_user_defined_cols; i++)
     {
       ulint col_pos= clust_field_nos[i];
       ulint field_len;
@@ -5456,7 +5456,7 @@ static void fts_init_recover_all_docs(fts_get_doc_t *get_doc,
       else fts_tokenize_document_next(&doc, doc_len, NULL, parser);
 
       doc_len+=
-        (i < get_doc->index_cache->index->n_user_defined_cols - 1)
+        (i < (unsigned) get_doc->index_cache->index->n_user_defined_cols - 1)
         ? field_len + 1
         : field_len;
     }

@@ -163,7 +163,7 @@ fts_select_index_by_hash(
 	/* Get collation hash code */
 	my_ci_hash_sort(cs, str, char_len, &nr1, &nr2);
 
-	return(nr1 % FTS_NUM_AUX_INDEX);
+	return static_cast<uint8_t>(nr1 % FTS_NUM_AUX_INDEX);
 }
 
 /** Select the FTS auxiliary index for the given character.

@@ -268,16 +268,6 @@ struct fts_word_freq_t {
 };
 
 /********************************************************************
-Callback function to fetch the rows in an FTS INDEX record.
-@return always TRUE */
-static
-ibool
-fts_query_index_fetch_nodes(
-/*========================*/
-	void*		row,		/*!< in: sel_node_t* */
-	void*		user_arg);	/*!< in: pointer to ib_vector_t */
-
-/********************************************************************
 Read and filter nodes.
 @return fts_node_t instance */
 static
@@ -318,14 +308,11 @@ static bool node_query_processor(
    const rec_offs* offsets, void* user_arg)
 {
   fts_query_t* query= static_cast<fts_query_t*>(user_arg);
-  fts_string_t key;
   ulint word_len;
   const byte* word_data = rec_get_nth_field(rec, offsets, 0, &word_len);
   if (!word_data || word_len == UNIV_SQL_NULL ||
       word_len > FTS_MAX_WORD_LEN)
     return true;
-  key.f_str= const_cast<byte*>(word_data);
-  key.f_len= word_len;
   ut_a(query->cur_node->type == FTS_AST_TERM
        || query->cur_node->type == FTS_AST_TEXT
            || query->cur_node->type == FTS_AST_PARSER_PHRASE_LIST);
@@ -2100,7 +2087,7 @@ dberr_t fts_query_fetch_document(dict_index_t *fts_index,
       &user_table->cols[user_table->fts->doc_col], index);
 
     ulint len;
-    rec_get_nth_field(rec, offsets, doc_col_pos, &len);
+    rec_get_nth_field_offs(offsets, doc_col_pos, &len);
     if (len != sizeof(doc_id_t))
       return true;
 
@@ -2517,7 +2504,6 @@ fts_query_phrase_search(
 	/* Ignore empty strings. */
 	if (num_token > 0) {
 		fts_string_t*	token = NULL;
-		fts_fetch_t	fetch;
 		trx_t*		trx = query->trx;
 		fts_ast_oper_t	oper = query->oper;
 		ulint		i;
@@ -2553,11 +2539,6 @@ fts_query_phrase_search(
 				query->matched = query->match_array[0];
 			}
 		}
-
-		/* Setup the callback args for filtering and consolidating
-		the ilist. */
-		fetch.read_arg = query;
-		fetch.read_record = fts_query_index_fetch_nodes;
 
 		for (i = 0; i < num_token; i++) {
 			/* Search for the first word from the phrase. */
@@ -3027,156 +3008,6 @@ fts_query_filter_doc_ids(
 		return(DB_FTS_EXCEED_RESULT_CACHE_LIMIT);
 	} else {
 		return(DB_SUCCESS);
-	}
-}
-
-/*****************************************************************//**
-Read the FTS INDEX row.
-@return DB_SUCCESS if all go well. */
-static
-dberr_t
-fts_query_read_node(
-/*================*/
-	fts_query_t*		query,	/*!< in: query instance */
-	const fts_string_t*	word,	/*!< in: current word */
-	que_node_t*		exp)	/*!< in: query graph node */
-{
-	int			i;
-	int			ret;
-	fts_node_t		node;
-	ib_rbt_bound_t		parent;
-	fts_word_freq_t*	word_freq;
-	ibool			skip = FALSE;
-	fts_string_t		term;
-	byte			buf[FTS_MAX_WORD_LEN + 1];
-	dberr_t			error = DB_SUCCESS;
-
-	ut_a(query->cur_node->type == FTS_AST_TERM
-	     || query->cur_node->type == FTS_AST_TEXT
-	     || query->cur_node->type == FTS_AST_PARSER_PHRASE_LIST);
-
-	memset(&node, 0, sizeof(node));
-	term.f_str = buf;
-
-	/* Need to consider the wildcard search case, the word frequency
-	is created on the search string not the actual word. So we need
-	to assign the frequency on search string behalf. */
-	if (query->cur_node->type == FTS_AST_TERM
-	    && query->cur_node->term.wildcard) {
-
-		term.f_len = query->cur_node->term.ptr->len;
-		ut_ad(FTS_MAX_WORD_LEN >= term.f_len);
-		memcpy(term.f_str, query->cur_node->term.ptr->str, term.f_len);
-	} else {
-		term.f_len = word->f_len;
-		ut_ad(FTS_MAX_WORD_LEN >= word->f_len);
-		memcpy(term.f_str, word->f_str, word->f_len);
-	}
-
-	/* Lookup the word in our rb tree, it must exist. */
-	ret = rbt_search(query->word_freqs, &parent, &term);
-
-	ut_a(ret == 0);
-
-	word_freq = rbt_value(fts_word_freq_t, parent.last);
-
-	/* Start from 1 since the first column has been read by the caller.
-	Also, we rely on the order of the columns projected, to filter
-	out ilists that are out of range and we always want to read
-	the doc_count irrespective of the suitability of the row. */
-
-	for (i = 1; exp && !skip; exp = que_node_get_next(exp), ++i) {
-
-		dfield_t*	dfield = que_node_get_val(exp);
-		byte*		data = static_cast<byte*>(
-			dfield_get_data(dfield));
-		ulint		len = dfield_get_len(dfield);
-
-		ut_a(len != UNIV_SQL_NULL);
-
-		/* Note: The column numbers below must match the SELECT. */
-
-		switch (i) {
-		case 1: /* DOC_COUNT */
-			word_freq->doc_count += mach_read_from_4(data);
-			break;
-
-		case 2: /* FIRST_DOC_ID */
-			node.first_doc_id = fts_read_doc_id(data);
-
-			/* Skip nodes whose doc ids are out range. */
-			if (query->oper == FTS_EXIST
-			    && query->upper_doc_id > 0
-			    && node.first_doc_id > query->upper_doc_id) {
-				skip = TRUE;
-			}
-			break;
-
-		case 3: /* LAST_DOC_ID */
-			node.last_doc_id = fts_read_doc_id(data);
-
-			/* Skip nodes whose doc ids are out range. */
-			if (query->oper == FTS_EXIST
-			    && query->lower_doc_id > 0
-			    && node.last_doc_id < query->lower_doc_id) {
-				skip = TRUE;
-			}
-			break;
-
-		case 4: /* ILIST */
-
-			error = fts_query_filter_doc_ids(
-					query, &word_freq->word, word_freq,
-					&node, data, len, FALSE);
-
-			break;
-
-		default:
-			ut_error;
-		}
-	}
-
-	if (!skip) {
-		/* Make sure all columns were read. */
-
-		ut_a(i == 5);
-	}
-
-	return error;
-}
-
-/*****************************************************************//**
-Callback function to fetch the rows in an FTS INDEX record.
-@return always returns TRUE */
-static
-ibool
-fts_query_index_fetch_nodes(
-/*========================*/
-	void*		row,		/*!< in: sel_node_t* */
-	void*		user_arg)	/*!< in: pointer to fts_fetch_t */
-{
-	fts_string_t	key;
-	sel_node_t*	sel_node = static_cast<sel_node_t*>(row);
-	fts_fetch_t*	fetch = static_cast<fts_fetch_t*>(user_arg);
-	fts_query_t*	query = static_cast<fts_query_t*>(fetch->read_arg);
-	que_node_t*	exp = sel_node->select_list;
-	dfield_t*	dfield = que_node_get_val(exp);
-	void*		data = dfield_get_data(dfield);
-	ulint		dfield_len = dfield_get_len(dfield);
-
-	key.f_str = static_cast<byte*>(data);
-	key.f_len = dfield_len;
-
-	ut_a(dfield_len <= FTS_MAX_WORD_LEN);
-
-	/* Note: we pass error out by 'query->error' */
-	query->error = fts_query_read_node(query, &key, que_node_get_next(exp));
-
-	if (query->error != DB_SUCCESS) {
-		ut_ad(query->error == DB_FTS_EXCEED_RESULT_CACHE_LIMIT);
-		return(FALSE);
-	} else {
-		return(TRUE);
 	}
 }
 

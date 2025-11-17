@@ -369,14 +369,29 @@ public:
   { return thd == resize_initiator; }
 
   /** Replicate a write to the log.
+  @tparam mmap whether the memory-mapped interface is enabled
   @param lsn  start LSN
   @param end  end of the mini-transaction
   @param len  length of the mini-transaction
   @param seq  offset of the sequence bit from the end */
+  template<bool mmap>
   inline void resize_write(lsn_t lsn, const byte *end,
-                           size_t len, size_t seq) noexcept;
+                           size_t len, size_t seq) noexcept
+  {
+    if (UNIV_LIKELY_NULL(resize_buf))
+      resize_write_low<mmap>(lsn, end, len, seq);
+  }
 
 private:
+  /** Replicate a write to the log.
+  @tparam mmap whether the memory-mapped interface is enabled
+  @param lsn  start LSN
+  @param end  end of the mini-transaction
+  @param len  length of the mini-transaction
+  @param seq  offset of the sequence bit from the end */
+  template<bool mmap>
+  ATTRIBUTE_COLD void resize_write_low(lsn_t lsn, const byte *end,
+                                       size_t len, size_t seq) noexcept;
   /** Write resize_buf to resize_log.
   @param b       resize_buf or resize_flush_buf
   @param length  the used length of b */

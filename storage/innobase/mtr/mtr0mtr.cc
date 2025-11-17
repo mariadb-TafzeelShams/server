@@ -854,9 +854,9 @@ static time_t log_close_warn_time;
 making the server crash-unsafe. */
 ATTRIBUTE_COLD static void log_overwrite_warning(lsn_t lsn)
 {
-  ut_ad(!log_sys.archive);
+  ut_ad(!log_sys.archive); /* we hope that this is unreachable */
 
-  if (log_sys.overwrite_warned)
+  if (log_sys.overwrite_warned || log_sys.archive)
     return;
 
   time_t t= time(nullptr);
@@ -891,9 +891,9 @@ log_t::append_prepare<log_t::ARCHIVED_MMAP>(size_t size, bool ex) noexcept
   static_assert(WRITE_TO_BUF == WRITE_BACKOFF << 1, "");
   while (UNIV_UNLIKELY((l= write_lsn_offset.fetch_add(size + WRITE_TO_BUF) &
                         (WRITE_TO_BUF - 1)) >=
-                       size_t(capacity() -
-                              ((lsn= base_lsn.load(std::memory_order_relaxed)) -
-                               first_lsn)) - size))
+                       capacity() -
+                       (lsn= base_lsn.load(std::memory_order_relaxed)) -
+                       first_lsn - size))
   {
     /* The following is inlined here instead of being part of
     append_prepare_wait(), in order to increase the locality of reference
@@ -1029,10 +1029,9 @@ std::pair<lsn_t,byte*> log_t::append_prepare(size_t size, bool ex) noexcept
     append_prepare_wait(late, ex);
   }
 
-  const lsn_t lsn{l + base_lsn.load(std::memory_order_relaxed)},
-    end_lsn{lsn + size};
+  const lsn_t lsn{l + base_lsn.load(std::memory_order_relaxed)};
 
-  if (UNIV_UNLIKELY(end_lsn >= last_checkpoint_lsn + log_capacity))
+  if (UNIV_UNLIKELY(lsn + size >= last_checkpoint_lsn + log_capacity))
     set_check_for_checkpoint(true);
 
   return {lsn,
@@ -1172,12 +1171,14 @@ func_exit:
   return finish_write(len);
 }
 
-inline void log_t::resize_write(lsn_t lsn, const byte *end, size_t len,
-                                size_t seq) noexcept
+template<bool mmap>
+ATTRIBUTE_COLD
+void log_t::resize_write_low(lsn_t lsn, const byte *end,
+                             size_t len, size_t seq) noexcept
 {
   ut_ad(latch_have_any());
+  ut_ad(resize_buf);
 
-  if (UNIV_LIKELY_NULL(resize_buf))
   {
     ut_ad(end >= buf);
     end-= len;
@@ -1361,13 +1362,23 @@ wrote_trailer:
   static_assert(mode == log_t::WRITE_NORMAL, "");
 #endif
 
-  if (mode == log_t::ARCHIVED_MMAP)
-    ut_ad(!log_sys.resize_in_progress());
-  else
-    log_sys.resize_write(start.first, start.second, len, size);
-
   mtr->m_commit_lsn= start.first + len;
-  return {start.first, log_close(mtr->m_commit_lsn)};
+
+  switch (mode) {
+  case log_t::ARCHIVED_MMAP:
+    ut_ad(!log_sys.resize_in_progress());
+    return {start.first, (log_sys.get_first_lsn() > log_sys.last_checkpoint_lsn
+                          ? log_sys.get_first_lsn() : 0)};
+  case log_t::CIRCULAR_MMAP:
+    log_sys.resize_write<true>(start.first, start.second, len, size);
+    return {start.first, log_close(mtr->m_commit_lsn)};
+  case log_t::WRITE_NORMAL:
+    log_sys.resize_write<false>(start.first, start.second, len, size);
+    return {start.first, log_sys.archive
+            ? (log_sys.get_first_lsn() > log_sys.last_checkpoint_lsn
+               ? log_sys.get_first_lsn() : 0)
+            : log_close(mtr->m_commit_lsn)};
+  }
 }
 
 bool mtr_t::have_x_latch(const buf_block_t &block) const

@@ -1060,14 +1060,12 @@ ATTRIBUTE_COLD void log_t::append_prepare_archived_mmap(bool late, bool ex)
     ut_ad(lsn - get_flushed_lsn(std::memory_order_relaxed) < capacity() ||
         overwrite_warned);
     persist(lsn); // TODO: pmem_persist()
-    latch.wr_unlock();
     /* Above we cleared the WRITE_BACKOFF flag,
     which our caller will recheck. */
     if (ex)
-    {
-      latch.wr_lock(SRW_LOCK_CALL);
       return;
-    }
+    latch.wr_unlock();
+    buf_flush_ahead(lsn, false);
   }
 
 done:

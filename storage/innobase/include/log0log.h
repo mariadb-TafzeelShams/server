@@ -259,8 +259,8 @@ private:
   of the next file created if archive==TRUE; protected by latch */
   lsn_t resize_target;
   /** Buffer for writing to resize_log; @see buf
-  Also a spare buffer between append_prepare_archived_mmap() and
-  archive_new_mmap() */
+  Also a spare buffer between archived_mmap_switch_prepare()
+  and archived_mmap_switch_complete() */
   byte *resize_buf;
   /** Buffer for writing to resize_log; @see flush_buf */
   byte *resize_flush_buf;
@@ -402,13 +402,6 @@ public:
   @return whether an error occurred */
   static bool resize_rename() noexcept;
 
-  /** @return pointer for writing to resize_buf
-  @retval nullptr if no is_mmap() based resizing is active */
-  inline byte *resize_buf_begin(lsn_t lsn) const noexcept;
-  /** @return end of resize_buf */
-  inline const byte *resize_buf_end() const noexcept
-  { return resize_buf + resize_target; }
-
   /** Initialise the redo log subsystem. */
   void create() noexcept;
 
@@ -484,9 +477,23 @@ public:
   /** Persist the log.
   @param lsn            desired new value of flushed_to_disk_lsn */
   void persist(lsn_t lsn) noexcept;
-  /** Switch the log buffers. */
-  inline void archive_new_mmap() noexcept;
+  /** @return the overflow buffer when ARCHIVED_MMAP is wrapping around */
+  byte *get_archived_mmap_switch() const noexcept
+  {
+    ut_ad(archived_mmap_switch());
+    return resize_buf + START_OFFSET;
+  }
 #endif
+  /** @return whether archived_mmap_switch_complete() needs to be called */
+  bool archived_mmap_switch() const noexcept
+  {
+    ut_ad(latch_have_any());
+    return UNIV_UNLIKELY(archive && resize_buf);
+  }
+  /** Attempt to finish archived_mmap_switch_prepare().
+  @return the current LSN in the new file
+  @retval 0 if no switch took place */
+  ATTRIBUTE_COLD lsn_t archived_mmap_switch_complete() noexcept;
   /** Create a new log file when the current one will fill up.
   @param buf     log records to append
   @param length  size of the log records, in bytes
@@ -539,7 +546,7 @@ private:
   /** Wait in append_prepare<ARCHIVED_MMAP>() for buffer to become available
   @param late   whether the WRITE_BACKOFF flag had already been set
   @param ex     whether log_sys.latch is exclusively locked */
-  ATTRIBUTE_COLD void append_prepare_archived_mmap(bool late, bool ex)
+  ATTRIBUTE_COLD void archived_mmap_switch_prepare(bool late, bool ex)
     noexcept;
 #endif
 public:

@@ -338,15 +338,48 @@ void mtr_t::release()
   m_memo.clear();
 }
 
+#ifdef HAVE_PMEM
+ATTRIBUTE_COLD lsn_t log_t::archived_mmap_switch_complete() noexcept
+{
+  ut_ad(latch_have_wr());
+  if (!archive || !resize_buf)
+    return 0;
+  const lsn_t lsn{get_lsn()}, end_lsn{first_lsn + capacity()};
+  if (lsn < end_lsn)
+    return 0;
+  persist(lsn);
+  my_munmap(buf, file_size);
+  /* TODO: make the file read-only */
+  buf= resize_buf;
+  resize_buf= nullptr;
+  first_lsn= end_lsn;
+  file_size= resize_target;
+  return lsn;
+}
+#endif
+
+template<bool mmap>
 ATTRIBUTE_NOINLINE void mtr_t::commit_log_release() noexcept
 {
   if (m_latch_ex)
   {
+  completed:
+    const lsn_t lsn{mmap ? log_sys.archived_mmap_switch_complete() : 0};
     log_sys.latch.wr_unlock();
     m_latch_ex= false;
+    if (mmap && lsn)
+      buf_flush_ahead(lsn, true);
   }
   else
+  {
+    const bool retry{mmap && log_sys.archived_mmap_switch()};
     log_sys.latch.rd_unlock();
+    if (retry)
+    {
+      log_sys.latch.wr_lock(SRW_LOCK_CALL);
+      goto completed;
+    }
+  }
 }
 
 static ATTRIBUTE_NOINLINE ATTRIBUTE_COLD
@@ -397,12 +430,12 @@ void mtr_t::commit_log(mtr_t *mtr, std::pair<lsn_t,lsn_t> lsns) noexcept
     buf_pool.page_cleaner_wakeup();
     mysql_mutex_unlock(&buf_pool.flush_list_mutex);
 
-    mtr->commit_log_release();
+    mtr->commit_log_release<mmap>();
     mtr->release();
   }
   else
   {
-    mtr->commit_log_release();
+    mtr->commit_log_release<mmap>();
 
     for (auto it= mtr->m_memo.rbegin(); it != mtr->m_memo.rend(); )
     {
@@ -893,7 +926,7 @@ log_t::append_prepare<log_t::ARCHIVED_MMAP>(size_t size, bool ex) noexcept
                         (WRITE_TO_BUF - 1)) >=
                        capacity() -
                        (lsn= base_lsn.load(std::memory_order_relaxed)) -
-                       first_lsn - size))
+                       first_lsn - size) && !resize_buf)
   {
     /* The following is inlined here instead of being part of
     append_prepare_wait(), in order to increase the locality of reference
@@ -901,30 +934,11 @@ log_t::append_prepare<log_t::ARCHIVED_MMAP>(size_t size, bool ex) noexcept
     bool late(write_lsn_offset.fetch_or(WRITE_BACKOFF) & WRITE_BACKOFF);
     /* Subtract our LSN overshoot. */
     write_lsn_offset.fetch_sub(size);
-    append_prepare_archived_mmap(late, ex);
+    archived_mmap_switch_prepare(late, ex);
   }
 
   lsn+= l;
   return {lsn, buf + FIRST_LSN + (lsn - first_lsn)};
-}
-
-inline void log_t::archive_new_mmap() noexcept
-{
-  ut_ad(latch_have_any());
-  ut_ad(!resize_log.is_opened());
-  ut_ad(!resize_in_progress());
-  ut_ad(resize_target >= 4U << 20);
-  ut_ad(is_latest());
-
-  resize_wrap_mutex.wr_lock();
-  if (resize_buf)
-  {
-    my_munmap(buf, size_t(file_size));
-    buf= resize_buf;
-    resize_buf= nullptr;
-    file_size= resize_target;
-  }
-  resize_wrap_mutex.wr_unlock();
 }
 #endif
 
@@ -1299,14 +1313,14 @@ mtr_t::finish_writer(mtr_t *mtr, size_t len)
 #ifdef HAVE_PMEM
   else
   {
-    byte *const end= &log_sys.buf[log_sys.file_size];
+    const size_t file_size= log_sys.file_size;
+    byte *const buf{log_sys.buf};
+    byte *const end= &buf[file_size];
     if (UNIV_LIKELY(start.second + len <= end))
       goto write_normal;
-    if (mode == log_t::CIRCULAR_MMAP)
-      log_sys.archived_lsn= 0;
-    else
-      log_sys.archive_new_mmap();
-    byte *const begin= &log_sys.buf[log_sys.START_OFFSET];
+    byte *const begin= mode == log_t::ARCHIVED_MMAP
+      ? log_sys.get_archived_mmap_switch()
+      : buf + log_sys.START_OFFSET;
     for (const mtr_buf_t::block_t &b : mtr->m_log)
     {
       size_t size{b.used()};

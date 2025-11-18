@@ -2172,7 +2172,8 @@ ATTRIBUTE_COLD void buf_flush_ahead(lsn_t lsn, bool furious) noexcept
   if (recv_recovery_is_on())
     recv_sys.apply(true);
 
-  DBUG_EXECUTE_IF("ib_log_checkpoint_avoid_hard", return;);
+  DBUG_EXECUTE_IF("ib_log_checkpoint_avoid_hard",
+                  if (!log_sys.archive) return;);
 
   Atomic_relaxed<lsn_t> &limit= furious
     ? buf_flush_sync_lsn : buf_flush_async_lsn;

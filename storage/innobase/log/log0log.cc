@@ -967,8 +967,8 @@ static size_t log_pad(lsn_t lsn, size_t pad, byte *begin, byte *extra)
 #endif
 
 #ifdef HAVE_PMEM
-ATTRIBUTE_COLD void log_t::append_prepare_archived_mmap(bool late, bool ex)
-  noexcept
+ATTRIBUTE_COLD
+void log_t::archived_mmap_switch_prepare(bool late, bool ex) noexcept
 {
   ut_ad(archive);
   ut_ad(is_mmap());
@@ -1056,16 +1056,13 @@ ATTRIBUTE_COLD void log_t::append_prepare_archived_mmap(bool late, bool ex)
     }
     while (false);
 
-    // TODO: adjust this, and clear the WRITE_BACKOFF flag
-    ut_ad(lsn - get_flushed_lsn(std::memory_order_relaxed) < capacity() ||
-        overwrite_warned);
-    persist(lsn); // TODO: pmem_persist()
+    ut_ad(lsn - get_flushed_lsn(std::memory_order_relaxed) < capacity());
+    persist(lsn);
     /* Above we cleared the WRITE_BACKOFF flag,
     which our caller will recheck. */
     if (ex)
       return;
     latch.wr_unlock();
-    buf_flush_ahead(lsn, false);
   }
 
 done:

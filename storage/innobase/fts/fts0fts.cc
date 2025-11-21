@@ -5417,6 +5417,7 @@ static void fts_init_recover_all_docs(fts_get_doc_t *get_doc,
     ulint doc_col_pos= dict_col_get_index_pos(
       &user_table->cols[user_table->fts->doc_col], index);
 
+    ulint processed_field= 0;
     ulint len;
     const byte* doc_id_data= rec_get_nth_field(rec, offsets, doc_col_pos, &len);
 
@@ -5426,40 +5427,41 @@ static void fts_init_recover_all_docs(fts_get_doc_t *get_doc,
 
       /* Process each indexed column content */
       for (unsigned i= 0; i < fts_index->n_user_defined_cols; i++)
-    {
-      ulint col_pos= clust_field_nos[i];
-      ulint field_len;
-      const byte* field_data= rec_get_nth_field(rec, offsets, col_pos,
-                                                &field_len);
-      if (field_len == UNIV_SQL_NULL)
-        continue;
-      if (!get_doc->index_cache->charset)
       {
-        dict_field_t* fts_field= dict_index_get_nth_field(fts_index, i);
-        get_doc->index_cache->charset= fts_get_charset(fts_field->col->prtype);
+        ulint col_pos= clust_field_nos[i];
+        ulint field_len;
+        const byte* field_data= rec_get_nth_field(rec, offsets, col_pos,
+                                                  &field_len);
+        if (field_len == UNIV_SQL_NULL)
+          continue;
+        if (!get_doc->index_cache->charset)
+        {
+          dict_field_t* fts_field= dict_index_get_nth_field(fts_index, i);
+          get_doc->index_cache->charset= fts_get_charset(fts_field->col->prtype);
+        }
+        doc.charset= get_doc->index_cache->charset;
+
+        /* Handle externally stored fields */
+        if (rec_offs_nth_extern(offsets, col_pos))
+          doc.text.f_str= btr_copy_externally_stored_field(
+            &doc.text.f_len, const_cast<byte*>(field_data),
+            user_table->space->zip_size(), field_len,
+            static_cast<mem_heap_t*>(doc.self_heap->arg));
+        else
+        {
+          doc.text.f_str= const_cast<byte*>(field_data);
+          doc.text.f_len= field_len;
+        }
+
+        if (processed_field == 0) fts_tokenize_document(&doc, NULL, parser);
+        else fts_tokenize_document_next(&doc, doc_len, NULL, parser);
+
+        processed_field++;
+        doc_len+=
+          (i < (unsigned) get_doc->index_cache->index->n_user_defined_cols - 1)
+          ? field_len + 1
+          : field_len;
       }
-      doc.charset= get_doc->index_cache->charset;
-
-      /* Handle externally stored fields */
-      if (rec_offs_nth_extern(offsets, col_pos))
-        doc.text.f_str= btr_copy_externally_stored_field(
-          &doc.text.f_len, const_cast<byte*>(field_data),
-          user_table->space->zip_size(), field_len,
-          static_cast<mem_heap_t*>(doc.self_heap->arg));
-      else
-      {
-        doc.text.f_str= const_cast<byte*>(field_data);
-        doc.text.f_len= field_len;
-      }
-
-      if (i == 0) fts_tokenize_document(&doc, NULL, parser);
-      else fts_tokenize_document_next(&doc, doc_len, NULL, parser);
-
-      doc_len+=
-        (i < (unsigned) get_doc->index_cache->index->n_user_defined_cols - 1)
-        ? field_len + 1
-        : field_len;
-    }
 
       fts_cache_add_doc(cache, get_doc->index_cache, doc_id, doc.tokens);
       fts_doc_free(&doc);

@@ -8,10 +8,8 @@ create table t2 as select * from t1;
 
 analyze table t1,t2 persistent for all;
 
---echo # OLEGS todo: 3. check other table-level hints
---echo # OLEGS todo: 4. More variety of hints
---echo # OLEGS todo: 6. Possible conflicts with explicit QB names
---echo # OLEGS todo: 7. MERGE/NO_MERGE
+--echo # OLEGS todo: 1. MERGE/NO_MERGE conflicts in opt_hints.test
+--echo # OLEGS todo: 2. Review and clean-up
 
 --echo
 --echo ================================================================

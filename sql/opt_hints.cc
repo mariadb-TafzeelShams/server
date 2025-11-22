@@ -85,26 +85,6 @@ int cmp_lex_string(const LEX_CSTRING &s, const LEX_CSTRING &t,
 }
 
 /*
-  Compare LEX_CSTRING objects using character count limit.
-
-  @param s      The 1st string
-  @param t      The 2nd string
-  @param cs     Pointer to character set
-  @param nchars Maximum number of characters to compare
-
-  @return  0 if strings are equal
-           1 if s is greater
-          -1 if t is greater
-*/
-
-int cmp_lex_string_nchars(const LEX_CSTRING &s, const LEX_CSTRING &t,
-                          const CHARSET_INFO *cs, size_t nchars)
-{
-  return cs->coll->strnncollsp_nchars(cs, (const uchar*)s.str, s.length,
-                                   (const uchar*)t.str, t.length, nchars, 0);
-}
-
-/*
   This is a version of push_warning_printf() guaranteeing no escalation of
   the warning to the level of error
 */
@@ -310,25 +290,42 @@ static Opt_hints_qb *find_hints_by_select_number(Parse_context *pc,
 
 /**
    Helper function to find_qb_hints whereby it matches a qb_name to
-   a select number under the presumption that qb_name has a value
-   like `select#X` (where X is a select number).
+   an alias of a derived table, view or CTE used in the current query.
+   For example, for query
+     `select * from (select t1.* from t1, t2 where t1.a > t2.a) as DT`
+   and given qb_name "DT", this function will return the query block
+   corresponding to the derived table DT.
 
-   @return the matching query block hints object, if it exists.
+   For query
+     `select * from v1, v1 as v2 where v1.a = v2.a and v1.a < 3`
+   and given qb_name "v2", this function will return the query block
+   corresponding to the view v2.
 
-   OLEGS: todo ^^^
+   For query
+     `with lda as (select count(*) from t1, (select * from t1 where a < 5) DT1)
+      select * from lda`
+   and given qb_name "lda", this function will return the query block
+   corresponding to the CTE "lda".
+
+   @return the pair: - result code
+                     - matching query block hints object, if it exists,
+                       and NULL otherwise
  */
 
 enum class implicit_qb_result
 {
-  OK,
-  AMBIGUOUS,
-  UNION,
-  NOT_FOUND
+  OK,        // Found exactly one match, success
+
+  // Failure statuses:
+  NOT_FOUND, // No matches found
+  AMBIGUOUS, // More than one alias matches qb_name in the current query
+  UNION      // DT/view/CTE has UNION/EXCEPT/INTERSECT inside
+             // (i.e., multiple query blocks), so the hint cannot be resolved
+             // unambiguously
 };
 
 static std::pair<implicit_qb_result, Opt_hints_qb*>
-  find_hints_by_implicit_qb_name(Parse_context *pc,
-                                 const Lex_ident_sys &qb_name)
+find_hints_by_implicit_qb_name(Parse_context *pc, const Lex_ident_sys &qb_name)
 {
   Opt_hints_qb *qb= nullptr;
 
@@ -339,13 +336,8 @@ static std::pair<implicit_qb_result, Opt_hints_qb*>
     if (!tbl->is_view_or_derived())
       continue;
 
-    // Check if the alias matches the implicit QB name pattern
-    LEX_CSTRING implicit_name;
-    char buff[sizeof(IMPLICIT_QB_NAME_PREFIX) + NAME_CHAR_LEN];
-    implicit_name.str= buff;
-    implicit_name.length= snprintf(buff, sizeof(buff), "%s%s",
-                                   IMPLICIT_QB_NAME_PREFIX, tbl->alias.str);
-    if (cmp_lex_string(implicit_name, qb_name, system_charset_info))
+    // Check if the alias equals the implicit QB name
+    if (cmp_lex_string(tbl->alias, qb_name, system_charset_info))
       continue;  // not a match, continue to next table
     
     if (qb)
@@ -357,30 +349,31 @@ static std::pair<implicit_qb_result, Opt_hints_qb*>
       return std::make_pair(implicit_qb_result::AMBIGUOUS, nullptr);
     }
 
-    SELECT_LEX *derived_sl;
+    SELECT_LEX *child_select;
     if (tbl->is_derived())
     {
-      derived_sl= tbl->derived->first_select();
+      child_select= tbl->derived->first_select();
     }
     else
     {
       DBUG_ASSERT(tbl->is_view());
-      derived_sl= tbl->view->unit.first_select();
+      child_select= tbl->view->unit.first_select();
     }
     /*
-      Check if the derived table does not contain UNION, because
-      implicit QB names for UNIONs are ambiguous - which SELECT should
-      the hint apply to? We only support implicit names for single-SELECT derived tables.
+      Check if the derived table/view does not contain UNION, because
+      implicit QB names for UNIONs are ambiguous - we do not know which SELECT
+      should the hint be applied to. So we only support implicit names
+      for single-SELECT derived tables/views.
     */
-    if (derived_sl->next_select())
+    if (child_select->next_select())
       return std::make_pair(implicit_qb_result::UNION, nullptr);
 
-    Parse_context derived_ctx(pc, derived_sl);
-    qb= get_qb_hints(&derived_ctx);
+    Parse_context child_ctx(pc, child_select);
+    qb= get_qb_hints(&child_ctx);
   }
 
-  return std::make_pair(
-    qb ? implicit_qb_result::OK : implicit_qb_result::NOT_FOUND, qb);
+  return std::make_pair(qb ? implicit_qb_result::OK :
+                             implicit_qb_result::NOT_FOUND, qb);
 }
 
 
@@ -412,10 +405,10 @@ Opt_hints_qb *find_qb_hints(Parse_context *pc,
   if (qb_by_name == nullptr)
     qb_by_number= find_hints_by_select_number(pc, qb_name);
 
-  Opt_hints_qb *qb_by_dt_name= nullptr;
+  Opt_hints_qb *qb_by_implicit_name= nullptr;
   if (qb_by_name == nullptr && qb_by_number == nullptr)
   {
-    std::pair<implicit_qb_result, Opt_hints_qb *> find_res=
+    std::pair<implicit_qb_result, Opt_hints_qb*> find_res=
       find_hints_by_implicit_qb_name(pc, qb_name);
     if (find_res.first == implicit_qb_result::AMBIGUOUS)
     {
@@ -427,13 +420,12 @@ Opt_hints_qb *find_qb_hints(Parse_context *pc,
     }
     if (find_res.first == implicit_qb_result::UNION)
     {
-      // OLEGS: new warning?
       print_warn(pc->thd, ER_WARN_IMPLICIT_QB_NAME_FOR_UNION,
                  hint_type, hint_state, &qb_name,
                  nullptr, nullptr, nullptr);
       return nullptr;
     }
-    qb_by_dt_name= find_res.second;
+    qb_by_implicit_name= find_res.second;
   }
 
   // C++-style comment here, otherwise compiler warns of /* within comment.
@@ -441,9 +433,9 @@ Opt_hints_qb *find_qb_hints(Parse_context *pc,
   // to a view (e.g. CREATE VIEW v1 AS SELECT /*+ NO_ICP(@`select#2` t1) ...
   // because of select numbering issues.  When we're ready to fix that, then we
   // can remove this gate.
-// OLEGS: update ^^^ , duplication with find_hints_by_number
+  // Implicit QB naming using DT/view aliases is also not supported inside views
   if (pc->thd->lex->sql_command == SQLCOM_CREATE_VIEW &&
-      (qb_by_number || qb_by_dt_name))
+      (qb_by_number || qb_by_implicit_name))
   {
     print_warn(pc->thd, ER_WARN_NO_IMPLICIT_QB_NAMES_IN_VIEW,
                hint_type, hint_state, &qb_name,
@@ -451,8 +443,8 @@ Opt_hints_qb *find_qb_hints(Parse_context *pc,
     return nullptr;
   }
 
-  Opt_hints_qb *qb= qb_by_name ? qb_by_name : 
-                    (qb_by_number ? qb_by_number : qb_by_dt_name);
+  Opt_hints_qb *qb= qb_by_name ? qb_by_name :
+                    (qb_by_number ? qb_by_number : qb_by_implicit_name);
   if (qb == nullptr)
     print_warn(pc->thd, ER_WARN_UNKNOWN_QB_NAME, hint_type, hint_state,
                &qb_name, NULL, NULL, NULL);

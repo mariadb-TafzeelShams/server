@@ -1,10 +1,6 @@
 #
 # Initialization
 --source include/default_optimizer_switch.inc
---disable_warnings
-drop table if exists t1,t2,t3;
-drop view if exists v1,v2;
---enable_warnings
 
 SET @save_optimizer_switch=@@optimizer_switch;
 SET optimizer_switch='outer_join_with_cache=off';
@@ -2037,6 +2033,18 @@ EXPLAIN SELECT count(*) FROM t2 JOIN t1 USING (id);
 EXPLAIN SELECT count(*) FROM t1 JOIN t2 USING (id);
 
 DROP TABLE t1,t2;
+
+--echo #
+--echo # MDEV-38168 Lots of joins can crash the server
+--echo #
+let $many_joins=SELECT * FROM t1;
+let $b=1000;
+while ($b) {
+  let $many_joins=$many_joins JOIN t1 x$b;
+  dec $b;
+}
+--error ER_TOO_MANY_TABLES
+evalp $many_joins;
 
 --echo # End of 10.11 tests
 

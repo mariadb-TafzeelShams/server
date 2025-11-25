@@ -1397,7 +1397,7 @@ void fts_optimize_words(fts_optimize_t *optim, dict_index_t *index,
     ut_a(ib_vector_size(optim->words) == 0);
     /* Read the index records to optimize. */
     dberr_t error= fts_index_fetch_nodes(
-      trx, index, word, optim->words, nullptr, AuxCompareMode::LIKE);
+      trx, index, word, optim->words, nullptr, AuxCompareMode::EQUAL);
     if (error == DB_SUCCESS)
     {
       /* There must be some nodes to read. */

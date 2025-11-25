@@ -786,10 +786,10 @@ RecordCompareAction AuxRecordReader::compare_record(
       else /* AuxCompareMode::LIKE */
       {
         /* For LIKE mode, compare only the prefix (search_len bytes) */
-        int prefix_cmp = cmp_data(type->mtype, type->prtype, false,
-                                  static_cast<const byte*>(search_data),
-                                  search_len, rec_data,
-                                  search_len <= rec_len ? search_len : rec_len);
+        int prefix_cmp= cmp_data(type->mtype, type->prtype, false,
+                                 static_cast<const byte*>(search_data),
+                                 search_len, rec_data,
+                                 search_len <= rec_len ? search_len : rec_len);
 
         if (prefix_cmp != 0) return RecordCompareAction::STOP;
         return (search_len <= rec_len) ? RecordCompareAction::PROCESS
